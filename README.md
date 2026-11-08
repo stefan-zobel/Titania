@@ -45,6 +45,10 @@ read from the file `M.Mod`, in the directory of the importing file or else in a
 directory given with `-I`. With `-oberonc`, Titania also predeclares the names
 that the test programs of the compiler `oberonc` use.
 
+Since Titania uses only the standard prelude and the POSIX module, it should in
+principle also compile and run with ga68, the Algol 68 front end of GCC. This
+has not been tested.
+
 ## Language
 
 Titania implements the Oberon-07 report of 3 May 2016, without the module
