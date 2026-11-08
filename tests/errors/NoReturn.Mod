@@ -1,0 +1,4 @@
+MODULE NoReturn;
+  PROCEDURE F(): INTEGER;
+  END F;
+END NoReturn.

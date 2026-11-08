@@ -1,0 +1,1 @@
+BadChar.Mod:2:19: error: illegal character

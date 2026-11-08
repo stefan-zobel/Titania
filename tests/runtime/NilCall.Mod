@@ -1,0 +1,5 @@
+MODULE NilCall;
+  VAR p: PROCEDURE;
+BEGIN
+  p
+END NilCall.

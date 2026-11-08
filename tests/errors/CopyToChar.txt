@@ -1,0 +1,1 @@
+CopyToChar.Mod:3:17: error: an array of characters is required

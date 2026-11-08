@@ -1,0 +1,21 @@
+hello
+5 3 0
+HELLO hello
+lit|4
+hello|16
+hello|6
+-|2
+#<l
+=lg
+#>g
+#<l
+=lg
+#>g
+=lg
+eq gt first
+x 0
+-!
+he
+0
+abc
+tab	x

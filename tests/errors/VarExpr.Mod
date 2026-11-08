@@ -1,0 +1,6 @@
+MODULE VarExpr;
+  PROCEDURE P(VAR v: INTEGER);
+  END P;
+BEGIN
+  P(1 + 2)
+END VarExpr.

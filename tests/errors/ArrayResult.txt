@@ -1,0 +1,1 @@
+ArrayResult.Mod:3:18: error: the result of a function cannot be an array or a record

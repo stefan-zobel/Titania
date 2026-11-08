@@ -1,0 +1,1 @@
+Unused.Mod:6:3: error: the result of a function must be used

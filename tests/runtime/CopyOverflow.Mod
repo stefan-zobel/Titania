@@ -1,0 +1,9 @@
+MODULE CopyOverflow;
+  VAR a: ARRAY 3 OF INTEGER; b: ARRAY 5 OF INTEGER;
+  PROCEDURE G(x: ARRAY OF INTEGER);
+  BEGIN
+    a := x
+  END G;
+BEGIN
+  G(b)
+END CopyOverflow.

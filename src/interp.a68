@@ -1,0 +1,323 @@
+{ interp.a68 - walks the syntax tree.
+
+  eval computes an expression, exec executes a statement and locate yields
+  the variable of a designator. All frames live in one stack: global variables
+  occupy its bottom, and base is the position of the current frame. }
+
+  int stack_size = 1000000;
+  ref [] Value stack = heap [1:stack_size] Value;
+  int sp := 0;
+
+  { The JVM thread of the program has a fixed stack. Recursion is limited
+    before it runs out, which could not be reported properly. }
+  int max_call_depth = 50000;
+  int call_depth := 0;
+
+  proc invoke = (ref Proc_def p, ref [] Expr args, int base, position) Value:
+    begin int frame = sp;
+          sp +:= n_slots of p;
+          call_depth +:= 1;
+          if sp > stack_size orel call_depth > max_call_depth
+          then runtime_error (position, "stack overflow")
+          fi;
+          for i to UPB args do stack[frame + i] := eval (args[i], base) od;
+          ref [] Value locals = locals of p;
+          int offset = frame + n_params of p;
+          for i to UPB locals do stack[offset + i] := locals[i] od;
+          ref [] Fresh fresh = fresh of p;
+          for i to UPB fresh
+          do stack[frame + fresh_slot of fresh[i] ] := new_instance (fresh_type of fresh[i])
+          od;
+          exec_seq (body of p, frame);
+          Value result = (has_result of p | eval (result of p, frame) | Value (0));
+          sp := frame;
+          call_depth -:= 1;
+          result
+    end;
+
+  proc call_native = (Native code, ref [] Expr args, int base) Value:
+    begin [1:UPB args] Value values;
+          for i to UPB args do values[i] := eval (args[i], base) od;
+          code (values)
+    end;
+
+  proc eval = (Expr e, int base) Value:
+    case e
+    in (ref Const_e c): value of c,
+       (ref Local_e v): stack[base + slot of v],
+       (ref Global_e v): stack[global_slot of v],
+       (ref Var_par_e v):
+         case stack[base + par_slot of v] in (Var_ref r): target of r esac,
+       (ref Int_e n):
+         begin int l = as_int (eval (left of n, base));
+               int r = as_int (eval (right of n, base));
+               if r = 0 andth (kind of n = op_div orel kind of n = op_mod)
+               then runtime_error (position of n, "division by zero")
+               fi;
+               int_op (kind of n, l, r)
+         end,
+       (ref Int_rel_e n):
+         begin int l = as_int (eval (left of n, base));
+               int r = as_int (eval (right of n, base));
+               int_rel (int_rel of n, l, r)
+         end,
+       (ref And_e n):
+         (as_bool (eval (left of n, base)) | eval (right of n, base) | Value (false)),
+       (ref Or_e n):
+         (as_bool (eval (first_or of n, base)) | Value (true) | eval (right of n, base)),
+       (ref Not_e n): NOT as_bool (eval (operand of n, base)),
+       (ref Call_e n): invoke (callee of n, args of n, base, position of n),
+       (ref Real_e n):
+         begin long real l = as_real (eval (left of n, base));
+               long real r = as_real (eval (right of n, base));
+               real_op (real_kind of n, l, r)
+         end,
+       (ref Real_rel_e n):
+         begin long real l = as_real (eval (left of n, base));
+               long real r = as_real (eval (right of n, base));
+               real_rel (real_rel of n, l, r)
+         end,
+       (ref Char_rel_e n):
+         begin char l = as_char (eval (left of n, base));
+               char r = as_char (eval (right of n, base));
+               char_rel (char_rel of n, l, r)
+         end,
+       (ref Set_e n):
+         begin bits l = as_set (eval (left of n, base));
+               bits r = as_set (eval (right of n, base));
+               set_op (set_kind of n, l, r)
+         end,
+       (ref In_e n):
+         begin int element = as_int (eval (element of n, base));
+               bits s = as_set (eval (set of n, base));
+               set_contains (s, element)
+         end,
+       (ref Range_e n):
+         begin int low = as_int (eval (low of n, base));
+               int high = as_int (eval (high of n, base));
+               range_set (low, high)
+         end,
+       (ref Eq_e n):
+         begin Value l = eval (left of n, base);
+               Value r = eval (right of n, base);
+               bool same = values_equal (l, r);
+               (negated of n | NOT same | same)
+         end,
+       (ref Unary_e n): unary_op (kind of n, eval (operand of n, base)),
+       (ref Call_var_e n):
+         case eval (callee of n, base)
+         in (ref Proc_def p):
+              if p is nil
+              then runtime_error (position of n, "call of a NIL procedure");
+                   skip
+              elif SOME native of p
+              then call_native (code of native of p, args of n, base)
+              else invoke (p, args of n, base, position of n)
+              fi
+         esac,
+       (ref Native_e n): call_native (code of n, args of n, base),
+       (ref Index_e n): element (n, base),
+       (ref Field_e n): (fields of as_record (eval (record of n, base)))[field of n],
+       (ref Deref_e n):
+         begin Value v = eval (pointer of n, base);
+               if ref Record_obj (as_record (v)) is nil
+               then runtime_error (position of n, "NIL dereference")
+               fi;
+               v
+         end,
+       (ref Guard_e n):
+         begin Value v = eval (guarded of n, base);
+               check_guard (n, v);
+               v
+         end,
+       (ref Is_e n):
+         begin ref Record_obj r = as_record (eval (tested of n, base));
+               (r isnt nil) andth extends (dyn_type of r, test_type of n)
+         end,
+       (ref Len_e n): UPB elems of as_array (eval (measured of n, base)),
+       (ref Str_rel_e n):
+         begin Value l = eval (left of n, base);
+               Value r = eval (right of n, base);
+               int_rel (str_rel of n, string_compare (l, r), 0)
+         end,
+       (ref Make_ref_e n):
+         begin Var_ref r;
+               target of r := locate (variable of n, base);
+               r
+         end
+    esac;
+
+  proc element = (ref Index_e n, int base) ref Value:
+    begin ref [] Value elems = elems of as_array (eval (array of n, base));
+          int i = as_int (eval (index of n, base));
+          if i < 0 orel i >= UPB elems
+          then runtime_error (position of n, "index out of range")
+          fi;
+          elems[i + 1]
+    end;
+
+  proc check_guard = (ref Guard_e n, Value v) void:
+    begin ref Record_obj r = as_record (v);
+          if r isnt nil
+          then if NOT extends (dyn_type of r, guard_type of n)
+               then runtime_error (position of n, "type guard failed")
+               fi
+          fi
+    end;
+
+  proc locate = (Expr e, int base) ref Value:
+    case e
+    in (ref Local_e v): stack[base + slot of v],
+       (ref Global_e v): stack[global_slot of v],
+       (ref Var_par_e v):
+         case stack[base + par_slot of v] in (Var_ref r): target of r esac,
+       (ref Index_e n): element (n, base),
+       (ref Field_e n): (fields of as_record (eval (record of n, base)))[field of n],
+       (ref Guard_e n):
+         begin check_guard (n, eval (guarded of n, base));
+               locate (guarded of n, base)
+         end
+    esac;
+
+  proc run_type_case = (ref Type_case_s c, int base) void:
+    begin ref Record_obj r = as_record (eval (type_selector of c, base));
+          ref [] Type_arm arms = type_arms of c;
+          bool found := r is nil;
+          for a to UPB arms while NOT found
+          do found := extends (dyn_type of r, arm_type of arms[a]);
+             if found then exec_seq (arm_body of arms[a], base) fi
+          od
+    end;
+
+  proc run_branches = (ref [] Guarded branches, int base) bool:
+    begin int k := 1;
+          bool chosen := false;
+          while NOT chosen andth k <= UPB branches
+          do if as_bool (eval (test of branches[k], base))
+             then exec_seq (body of branches[k], base);
+                  chosen := true
+             else k +:= 1
+             fi
+          od;
+          chosen
+    end;
+
+  proc run_case = (ref Case_s c, int base) void:
+    begin Value selector = eval (selector of c, base);
+          int k = (is_char of c | ABS as_char (selector) | as_int (selector));
+          ref [] Case_arm arms = arms of c;
+          bool found := false;
+          for a to UPB arms while NOT found
+          do ref [] Case_range labels = labels of arms[a];
+             for i to UPB labels while NOT found
+             do found := k >= low of labels[i] andth k <= high of labels[i] od;
+             if found then exec_seq (body of arms[a], base) fi
+          od;
+          if NOT found then runtime_error (position of c, "no matching CASE label") fi
+    end;
+
+  proc scale_by_power_of_two = (long real x, int n) long real:
+    begin long real result := x;
+          for i to ABS n
+          do result := (n > 0 | result * long 2.0 | result / long 2.0) od;
+          result
+    end;
+
+  proc run_unpk = (ref Unpk_s u, int base) void:
+    begin ref Value target = locate (unpk_target of u, base);
+          ref Value exponent = locate (exponent of u, base);
+          long real x := as_real (target);
+          int e := 0;
+          if x /= long 0.0
+          then while ABS x >= long 2.0 do x /:= long 2.0; e +:= 1 od;
+               while ABS x < long 1.0 do x *:= long 2.0; e -:= 1 od
+          fi;
+          target := x;
+          exponent := e
+    end;
+
+  proc exec = (Stmt s, int base) void:
+    case s
+    in (ref Assign_local_s a): stack[base + slot of a] := eval (source of a, base),
+       (ref Assign_s a):
+         begin ref Value target = locate (target of a, base);
+               target := eval (source of a, base)
+         end,
+       (ref Call_s c): eval (call of c, base),
+       (ref If_s i):
+         if NOT run_branches (branches of i, base)
+         then exec_seq (otherwise of i, base)
+         fi,
+       (ref While_s w):
+         while run_branches (branches of w, base) do skip od,
+       (ref Repeat_s r):
+         begin bool done := false;
+               while NOT done
+               do exec_seq (body of r, base);
+                  done := as_bool (eval (test of r, base))
+               od
+         end,
+       (ref For_s f):
+         begin ref Value v = locate (variable of f, base);
+               int step = step of f;
+               v := eval (first of f, base);
+               while int i = as_int (v);
+                     int last = as_int (eval (last of f, base));
+                     (step > 0 | i <= last | i >= last)
+               do exec_seq (body of f, base);
+                  v := as_int (v) + step
+               od
+         end,
+       (ref Case_s c): run_case (c, base),
+       (ref Inc_s i):
+         begin ref Value v = locate (target of i, base);
+               int sum = as_int (v) + as_int (eval (amount of i, base));
+               v := (is_byte of i | sum %* 256 | sum)
+         end,
+       (ref Set_elem_s u):
+         begin ref Value v = locate (target of u, base);
+               bits b = element_set (as_int (eval (element of u, base)));
+               v := (include of u | as_set (v) OR b | as_set (v) AND NOT b)
+         end,
+       (ref Assert_s a):
+         if NOT as_bool (eval (test of a, base))
+         then runtime_error (position of a, "ASSERT failed")
+         fi,
+       (ref Pack_s p):
+         begin ref Value v = locate (pack_target of p, base);
+               v := scale_by_power_of_two (as_real (v),
+                                           as_int (eval (exponent of p, base)))
+         end,
+       (ref Unpk_s u): run_unpk (u, base),
+       (ref Copy_s c):
+         begin Value target = eval (copy_target of c, base);
+               Value source = eval (copy_source of c, base);
+               copy_aggregate (copy_type of c, target, source, position of c)
+         end,
+       (ref New_s n): locate (new_target of n, base) := new_instance (alloc_type of n),
+       (ref Type_case_s c): run_type_case (c, base)
+    esac;
+
+  proc exec_seq = (ref Seq first, int base) void:
+    begin ref ref Seq p = loc ref Seq := first;
+          while SOME p
+          do exec (stmt of p, base);
+             p := next of p
+          od
+    end;
+
+  proc run = (ref Program program) void:
+    begin ref [] Value globals = globals of program;
+          stack[:UPB globals] := globals;
+          sp := UPB globals;
+          ref [] Fresh objects = global_objects of program;
+          for i to UPB objects
+          do stack[fresh_slot of objects[i] ] := new_instance (fresh_type of objects[i])
+          od;
+          ref ref Module_def m = loc ref Module_def := first of program;
+          while SOME m
+          do exec_seq (body of m, 0);
+             m := next of m
+          od
+    end;
+

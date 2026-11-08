@@ -1,0 +1,569 @@
+{ library.a68 - the modules that are built into Titania.
+
+  Each entry of the table natives names a module, gives the Oberon heading of
+  a procedure and the Algol 68 routine that implements it. The parser reads
+  the headings when a module is imported. }
+
+  Value no_result = 0;
+
+  int default_decimals = 6;
+
+  proc spaces = (int n) string: (n > 0 | n * " " | "");
+
+  proc right_justify = (string s, int width) string:
+    spaces (width - UPB s) + s;
+
+  proc is_nan = (long real x) bool: x /= x;
+
+  proc is_infinite = (long real x) bool:
+    x /= long 0.0 andth x / long 2.0 = x;
+
+  { The text of a value that fixed cannot format, or an empty string. }
+  proc special_text = (long real x) string:
+    if is_nan (x) then "NaN"
+    elif is_infinite (x) then (x > long 0.0 | "Infinity" | "-Infinity")
+    else ""
+    fi;
+
+  { The digits of a large x: 15 significant digits, then zeros. The routine
+    fixed does not terminate for such a value, since it compares x with a power
+    of ten held in a long int, which overflows. }
+  proc large_digits = (long real x, int after) string:
+    begin long real mantissa := x;
+          int exponent := 0;
+          while mantissa >= long 10.0
+          do mantissa /:= long 10.0; exponent +:= 1 od;
+          string s := fixed (mantissa, 0, 14);
+          if s[2] /= "."
+          then s := "1." + 14 * "0";
+               exponent +:= 1
+          fi;
+          s[1] + s[3:] + (exponent - 14) * "0" + (after > 0 | "." + after * "0" | "")
+    end;
+
+  { The digits of x, which is not negative. fixed omits a leading zero. }
+  proc fixed_digits = (long real x, int after) string:
+    if x >= long 1.0e18
+    then large_digits (x, after)
+    else string s = fixed (x, 0, after);
+         (s[1] = "." | "0" + s | s)
+    fi;
+
+  proc strip_zeros = (string s) string:
+    begin int last := UPB s;
+          while s[last] = "0" andth s[last - 1] /= "." do last -:= 1 od;
+          s[:last]
+    end;
+
+  { Up to 15 significant digits, in plain notation for moderate magnitudes
+    and otherwise as d.dddE+n. }
+  proc real_text = (long real x) string:
+    if string special = special_text (x); UPB special > 0 then special
+    elif x = long 0.0 then "0.0"
+    else long real magnitude = ABS x;
+         string sign = (x < long 0.0 | "-" | "");
+         if magnitude >= long 1.0e-3 andth magnitude < long 1.0e7
+         then int int_digits := 1;
+              long real limit := long 10.0;
+              while magnitude >= limit
+              do int_digits +:= 1; limit *:= long 10.0 od;
+              sign + strip_zeros (fixed_digits (magnitude, 15 - int_digits))
+         else int exponent := 0;
+              long real mantissa := magnitude;
+              while mantissa >= long 10.0
+              do mantissa /:= long 10.0; exponent +:= 1 od;
+              while mantissa < long 1.0
+              do mantissa *:= long 10.0; exponent -:= 1 od;
+              sign + strip_zeros (fixed_digits (mantissa, 14)) + "E"
+                + whole (exponent, 0)
+         fi
+    fi;
+
+  proc fixed_text = (long real x, int width, decimals) string:
+    if string special = special_text (x); UPB special > 0
+    then right_justify (special, width)
+    else right_justify ((x < long 0.0 | "-" | "")
+                          + fixed_digits (ABS x, decimals), width)
+    fi;
+
+  proc hex_text = (int x) string:
+    begin string digits = "0123456789ABCDEF";
+          [1:8] char result;
+          bits rest := BIN x;
+          for i from 8 by -1 to 1
+          do result[i] := digits[ABS (rest AND 16rf) + 1];
+             rest := rest SHR 4
+          od;
+          result
+    end;
+
+  { The characters of an Oberon string, up to the terminating 0X. }
+  proc text_of = (Value v) string:
+    case v
+    in (ref Array_obj a):
+         begin ref [] Value elems = elems of a;
+               int n := 0;
+               while (n < UPB elems | ABS as_char (elems[n + 1]) /= 0 | false)
+               do n +:= 1 od;
+               [1:n] char result;
+               for i to n do result[i] := as_char (elems[i]) od;
+               result
+         end
+    esac;
+
+  proc out_char = ([] Value a) Value:
+    begin puts (as_char (a[1])); no_result end;
+
+  proc out_string = ([] Value a) Value:
+    begin puts (text_of (a[1])); no_result end;
+
+  proc out_int = ([] Value a) Value:
+    begin puts (right_justify (whole (as_int (a[1]), 0), as_int (a[2])));
+          no_result
+    end;
+
+  proc out_real = ([] Value a) Value:
+    begin int width = as_int (a[2]);
+          puts ((width <= 0 | real_text (as_real (a[1]))
+                            | fixed_text (as_real (a[1]), width, default_decimals)));
+          no_result
+    end;
+
+  proc out_ln = ([] Value a) Value:
+    begin puts (REPR 10); no_result end;
+
+  proc out_hex = ([] Value a) Value:
+    begin puts (hex_text (as_int (a[1]))); no_result end;
+
+  proc out_fixed = ([] Value a) Value:
+    begin puts (fixed_text (as_real (a[1]), as_int (a[2]), as_int (a[3])));
+          no_result
+    end;
+
+  { Output is complete when the program ends. Oakwood programs still call
+    these procedures. }
+  proc no_operation = ([] Value a) Value: no_result;
+
+  { The module In. Standard input with one character of lookahead. }
+
+  int no_lookahead = -2;
+  int lookahead := no_lookahead;
+  bool input_done := true;
+
+  proc peek_char = int:
+    begin if lookahead = no_lookahead
+          then int c = ABS getchar;
+               lookahead := (c < 0 | -1 | c)
+          fi;
+          lookahead
+    end;
+
+  proc skip_char = void: lookahead := no_lookahead;
+
+  proc set_variable = (Value variable, Value v) void:
+    case variable in (Var_ref r): target of r := v esac;
+
+  { Stores s in an array of characters, truncated so that 0X ends it. }
+  proc store_text = (Value array, string s) void:
+    begin ref [] Value elems = elems of as_array (array);
+          int n = (UPB s < UPB elems | UPB s | UPB elems - 1);
+          for i to n do elems[i] := s[i] od;
+          if UPB elems > 0 then elems[n + 1] := REPR 0 fi
+    end;
+
+  { The next word of the input. }
+  proc read_token = string:
+    begin string token := "";
+          while peek_char >= 0 andth peek_char <= 32 do skip_char od;
+          while peek_char > 32 do token +:= REPR peek_char; skip_char od;
+          token
+    end;
+
+  proc int_from_text = (string t, ref bool ok) int:
+    begin bool negative = UPB t > 0 andth t[1] = "-";
+          int first = (negative orel (UPB t > 0 andth t[1] = "+") | 2 | 1);
+          long int limit = LENG max_int + (negative | long 1 | long 0);
+          long int value := long 0;
+          ok := first <= UPB t;
+          for i from first to UPB t while ok
+          do ok := is_digit (t[i]);
+             if ok
+             then value := value * long 10 + LENG digit_value (t[i]);
+                  ok := value <= limit
+             fi
+          od;
+          (ok | SHORTEN (negative | -value | value) | 0)
+    end;
+
+  proc real_from_text = (string t, ref bool ok) long real:
+    begin bool negative = UPB t > 0 andth t[1] = "-";
+          int i := (negative orel (UPB t > 0 andth t[1] = "+") | 2 | 1);
+          string digits := "";
+          int exponent := 0;
+          while (i <= UPB t | is_digit (t[i]) | false)
+          do digits +:= t[i]; i +:= 1 od;
+          if (i <= UPB t | t[i] = "." | false)
+          then i +:= 1;
+               while (i <= UPB t | is_digit (t[i]) | false)
+               do digits +:= t[i]; exponent -:= 1; i +:= 1 od
+          fi;
+          ok := UPB digits > 0;
+          if (i <= UPB t | t[i] = "E" orel t[i] = "e" | false)
+          then bool scale_ok;
+               int scale = int_from_text (t[i + 1:], scale_ok);
+               ok := ok andth scale_ok;
+               exponent +:= scale;
+               i := UPB t + 1
+          fi;
+          ok := ok andth i > UPB t;
+          long real value = (ok | decimal_value (digits, exponent) | long 0.0);
+          (negative | -value | value)
+    end;
+
+  proc in_int = ([] Value a) Value:
+    begin bool ok;
+          int v = int_from_text (read_token, ok);
+          input_done := ok;
+          if ok then set_variable (a[1], v) fi;
+          no_result
+    end;
+
+  proc in_real = ([] Value a) Value:
+    begin bool ok;
+          long real v = real_from_text (read_token, ok);
+          input_done := ok;
+          if ok then set_variable (a[1], v) fi;
+          no_result
+    end;
+
+  proc in_char = ([] Value a) Value:
+    begin input_done := peek_char >= 0;
+          if input_done then set_variable (a[1], REPR peek_char); skip_char fi;
+          no_result
+    end;
+
+  { Reads the rest of the line. }
+  proc in_string = ([] Value a) Value:
+    begin input_done := peek_char >= 0;
+          if input_done
+          then string s := "";
+               while peek_char >= 0 andth peek_char /= 10
+               do if peek_char /= 13 then s +:= REPR peek_char fi;
+                  skip_char
+               od;
+               skip_char;
+               store_text (a[1], s)
+          fi;
+          no_result
+    end;
+
+  proc in_done = ([] Value a) Value: input_done;
+
+  { The module Strings. }
+
+  proc limited = (int x, low, high) int:
+    (x < low | low |: x > high | high | x);
+
+  proc inserted = (string source, int pos, string dest) string:
+    begin int p = limited (pos, 0, UPB dest + 1);
+          (p > UPB dest | dest + source | dest[:p] + source + dest[p + 1:])
+    end;
+
+  proc deleted = (string s, int pos, n) string:
+    if pos >= UPB s
+    then s
+    else int p = limited (pos, 0, UPB s);
+         int count = limited (n, 0, UPB s - p);
+         s[:p] + s[p + count + 1:]
+    fi;
+
+  proc str_length = ([] Value a) Value: UPB text_of (a[1]);
+
+  proc str_append = ([] Value a) Value:
+    begin store_text (a[2], text_of (a[2]) + text_of (a[1])); no_result end;
+
+  proc str_insert = ([] Value a) Value:
+    begin store_text (a[3], inserted (text_of (a[1]), as_int (a[2]), text_of (a[3])));
+          no_result
+    end;
+
+  proc str_delete = ([] Value a) Value:
+    begin store_text (a[1], deleted (text_of (a[1]), as_int (a[2]), as_int (a[3])));
+          no_result
+    end;
+
+  proc str_replace = ([] Value a) Value:
+    begin string source = text_of (a[1]);
+          int pos = as_int (a[2]);
+          store_text (a[3], inserted (source, pos,
+                                      deleted (text_of (a[3]), pos, UPB source)));
+          no_result
+    end;
+
+  proc str_extract = ([] Value a) Value:
+    begin string s = text_of (a[1]);
+          int p = limited (as_int (a[2]), 0, UPB s);
+          int last = limited (p + as_int (a[3]), p, UPB s);
+          store_text (a[4], s[p + 1:last]);
+          no_result
+    end;
+
+  proc str_pos = ([] Value a) Value:
+    begin string pattern = text_of (a[1]), s = text_of (a[2]);
+          int result := (UPB pattern = 0 | 0 | -1);
+          for i from limited (as_int (a[3]), 0, max_int)
+            to UPB s - UPB pattern
+            while result < 0 andth UPB pattern > 0
+          do if s[i + 1:i + UPB pattern] = pattern then result := i fi od;
+          result
+    end;
+
+  proc str_cap = ([] Value a) Value:
+    begin string s := text_of (a[1]);
+          for i to UPB s do s[i] := upper_case (s[i]) od;
+          store_text (a[1], s);
+          no_result
+    end;
+
+  proc str_copy = ([] Value a) Value:
+    begin store_text (a[2], text_of (a[1])); no_result end;
+
+  { Writes s at the given place of an array and ends it with 0X. The result
+    is the position of the 0X, or -1 if s did not fit. }
+  proc write_text = (string s, ref [] Value elems, int place) int:
+    begin int room = UPB elems - 1;
+          if place < 0 orel place >= room
+          then -1
+          else int k = (place + UPB s > room | room - place | UPB s);
+               for i to k do elems[place + i] := s[i] od;
+               elems[place + k + 1] := REPR 0;
+               (k < UPB s | -1 | place + k)
+          fi
+    end;
+
+  proc str_write = ([] Value a) Value:
+    if UPB elems of as_array (a[1]) = 0
+    then -1
+    else write_text (text_of (a[1]), elems of as_array (a[2]), as_int (a[3]))
+    fi;
+
+  proc write_char_at = (char c, ref [] Value elems, int place) int:
+    if place >= 0 andth place + 1 < UPB elems
+    then elems[place + 1] := c;
+         elems[place + 2] := REPR 0;
+         place + 1
+    else -1
+    fi;
+
+  proc str_write_char = ([] Value a) Value:
+    write_char_at (as_char (a[1]), elems of as_array (a[2]), as_int (a[3]));
+
+  proc str_append_char = ([] Value a) Value:
+    begin write_char_at (as_char (a[1]), elems of as_array (a[2]), UPB text_of (a[2]));
+          no_result
+    end;
+
+  { Nothing is written if the number and its padding do not fit. }
+  proc write_int_at = (int x, n, ref [] Value elems, int place) int:
+    begin string s = (x = -max_int - 1 | " -2147483648"
+                                       | right_justify (whole (x, 0), n));
+          if place >= 0 andth place + UPB s < UPB elems
+          then write_text (s, elems, place)
+          else -1
+          fi
+    end;
+
+  proc str_write_int = ([] Value a) Value:
+    write_int_at (as_int (a[1]), as_int (a[2]), elems of as_array (a[3]), as_int (a[4]));
+
+  proc str_append_int = ([] Value a) Value:
+    begin write_int_at (as_int (a[1]), as_int (a[2]), elems of as_array (a[3]),
+                        UPB text_of (a[3]));
+          no_result
+    end;
+
+  { The predefined procedure COPY and the end of the program. }
+
+  proc copy_string = ([] Value a) Value:
+    begin store_text (a[2], text_of (a[1])); no_result end;
+
+  proc halt_program = ([] Value a) Value:
+    begin posix_exit (as_int (a[1])); no_result end;
+
+  { The predeclared names of the compiler oberonc, for its test programs. }
+
+  proc write_int = ([] Value a) Value:
+    begin int x = as_int (a[1]);
+          puts ((x >= -99 andth x <= 999 | right_justify (whole (x, 0), 4)
+                                         | " " + whole (x, 0)));
+          no_result
+    end;
+
+  proc read_int = ([] Value a) Value:
+    begin bool negative = peek_char = 45;
+          int value := 0;
+          if negative then skip_char fi;
+          while peek_char >= 0 andth (peek_char /= 32 andth peek_char /= 10)
+          do value := value * 10 + peek_char - 48; skip_char od;
+          skip_char;
+          (negative | -value | value)
+    end;
+
+  proc end_of_text = ([] Value a) Value: peek_char < 0;
+
+  proc write_real = ([] Value a) Value:
+    begin puts (" " + fixed_text (as_real (a[1]), 0, default_decimals));
+          no_result
+    end;
+
+  proc bit_and = ([] Value a) Value: ABS (BIN as_int (a[1]) AND BIN as_int (a[2]));
+  proc bit_or = ([] Value a) Value: ABS (BIN as_int (a[1]) OR BIN as_int (a[2]));
+  proc bit_not = ([] Value a) Value: ABS (NOT BIN as_int (a[1]));
+
+  { The modules Math and MathL. }
+
+  long real half = long 0.5, two = long 2.0, one = long 1.0;
+
+  proc power = (long real x, base) long real: long_exp (x * long_ln (base));
+
+  proc arc_tangent = (long real x, y) long real:
+    if y > long 0.0 then long_arctan (x / y)
+    elif y < long 0.0
+    then long_arctan (x / y) + (x >= long 0.0 | long_pi | -long_pi)
+    else (x >= long 0.0 | long_pi | -long_pi) / two
+    fi;
+
+  proc sinh = (long real x) long real: (long_exp (x) - long_exp (-x)) / two;
+  proc cosh = (long real x) long real: (long_exp (x) + long_exp (-x)) / two;
+
+  proc math_sqrt = ([] Value a) Value: long_sqrt (as_real (a[1]));
+  proc math_power = ([] Value a) Value: power (as_real (a[1]), as_real (a[2]));
+  proc math_exp = ([] Value a) Value: long_exp (as_real (a[1]));
+  proc math_ln = ([] Value a) Value: long_ln (as_real (a[1]));
+  proc math_log = ([] Value a) Value:
+    long_ln (as_real (a[1])) / long_ln (as_real (a[2]));
+  proc math_round = ([] Value a) Value:
+    long real (ENTIER (as_real (a[1]) + half));
+  proc math_sin = ([] Value a) Value: long_sin (as_real (a[1]));
+  proc math_cos = ([] Value a) Value: long_cos (as_real (a[1]));
+  proc math_tan = ([] Value a) Value: long_tan (as_real (a[1]));
+  proc math_arcsin = ([] Value a) Value: long_arcsin (as_real (a[1]));
+  proc math_arccos = ([] Value a) Value: long_arccos (as_real (a[1]));
+  proc math_arctan = ([] Value a) Value: long_arctan (as_real (a[1]));
+  proc math_arctan2 = ([] Value a) Value:
+    arc_tangent (as_real (a[1]), as_real (a[2]));
+  proc math_sinh = ([] Value a) Value: sinh (as_real (a[1]));
+  proc math_cosh = ([] Value a) Value: cosh (as_real (a[1]));
+  proc math_tanh = ([] Value a) Value:
+    begin long real x = as_real (a[1]);
+          (ABS x > long 20.0 | (x > long 0.0 | one | -one) | sinh (x) / cosh (x))
+    end;
+  proc math_arcsinh = ([] Value a) Value:
+    begin long real x = as_real (a[1]); long_ln (x + long_sqrt (x * x + one)) end;
+  proc math_arccosh = ([] Value a) Value:
+    begin long real x = as_real (a[1]); long_ln (x + long_sqrt (x * x - one)) end;
+  proc math_arctanh = ([] Value a) Value:
+    begin long real x = as_real (a[1]); half * long_ln ((one + x) / (one - x)) end;
+
+  { The first spelling is that of oberonc, the second that of the Oakwood
+    guidelines. }
+  mode Math_def = struct (string lower_name, capital_name, signature, Native math_code);
+
+  string unary_signature = "(x: REAL): REAL", binary_signature = "(x, y: REAL): REAL";
+
+  [] Math_def math_functions =
+    (("sqrt", "Sqrt", unary_signature, math_sqrt),
+     ("power", "Power", binary_signature, math_power),
+     ("exp", "Exp", unary_signature, math_exp),
+     ("ln", "Ln", unary_signature, math_ln),
+     ("log", "Log", binary_signature, math_log),
+     ("round", "Round", unary_signature, math_round),
+     ("sin", "Sin", unary_signature, math_sin),
+     ("cos", "Cos", unary_signature, math_cos),
+     ("tan", "Tan", unary_signature, math_tan),
+     ("arcsin", "ArcSin", unary_signature, math_arcsin),
+     ("arccos", "ArcCos", unary_signature, math_arccos),
+     ("arctan", "ArcTan", unary_signature, math_arctan),
+     ("arctan2", "ArcTan2", binary_signature, math_arctan2),
+     ("sinh", "SinH", unary_signature, math_sinh),
+     ("cosh", "CosH", unary_signature, math_cosh),
+     ("tanh", "TanH", unary_signature, math_tanh),
+     ("arcsinh", "ArcSinH", unary_signature, math_arcsinh),
+     ("arccosh", "ArcCosH", unary_signature, math_arccosh),
+     ("arctanh", "ArcTanH", unary_signature, math_arctanh));
+
+  string predeclared = "predeclared";
+
+  [] Native_def fixed_natives =
+    (("Out", "Char(ch: CHAR)", out_char),
+     ("Out", "String(s: ARRAY OF CHAR)", out_string),
+     ("Out", "Int(x, n: INTEGER)", out_int),
+     ("Out", "LongInt(x, n: INTEGER)", out_int),
+     ("Out", "Real(x: REAL; n: INTEGER)", out_real),
+     ("Out", "LongReal(x: REAL; n: INTEGER)", out_real),
+     ("Out", "Fixed(x: REAL; n, k: INTEGER)", out_fixed),
+     ("Out", "Ln", out_ln),
+     ("Out", "Hex(x: INTEGER)", out_hex),
+     ("Out", "Open", no_operation),
+     ("Out", "Flush", no_operation),
+     ("In", "VAR Done: BOOLEAN", in_done),
+     ("In", "Open", no_operation),
+     ("In", "Int(VAR x: INTEGER)", in_int),
+     ("In", "LongInt(VAR x: INTEGER)", in_int),
+     ("In", "Real(VAR x: REAL)", in_real),
+     ("In", "LongReal(VAR x: REAL)", in_real),
+     ("In", "Char(VAR ch: CHAR)", in_char),
+     ("In", "String(VAR s: ARRAY OF CHAR)", in_string),
+     ("Strings", "Length(s: ARRAY OF CHAR): INTEGER", str_length),
+     ("Strings", "Append(extra: ARRAY OF CHAR; VAR dest: ARRAY OF CHAR)", str_append),
+     ("Strings", "Insert(source: ARRAY OF CHAR; pos: INTEGER; VAR dest: ARRAY OF CHAR)",
+      str_insert),
+     ("Strings", "Delete(VAR s: ARRAY OF CHAR; pos, n: INTEGER)", str_delete),
+     ("Strings", "Replace(source: ARRAY OF CHAR; pos: INTEGER; VAR dest: ARRAY OF CHAR)",
+      str_replace),
+     ("Strings", "Extract(source: ARRAY OF CHAR; pos, n: INTEGER; VAR dest: ARRAY OF CHAR)",
+      str_extract),
+     ("Strings", "Pos(pattern, s: ARRAY OF CHAR; pos: INTEGER): INTEGER", str_pos),
+     ("Strings", "Cap(VAR s: ARRAY OF CHAR)", str_cap),
+     ("Strings", "Copy(source: ARRAY OF CHAR; VAR dest: ARRAY OF CHAR)", str_copy),
+     ("Strings", "Write(source: ARRAY OF CHAR; VAR dest: ARRAY OF CHAR; at: INTEGER): INTEGER",
+      str_write),
+     ("Strings", "WriteChar(c: CHAR; VAR dest: ARRAY OF CHAR; at: INTEGER): INTEGER",
+      str_write_char),
+     ("Strings", "AppendChar(c: CHAR; VAR dest: ARRAY OF CHAR)", str_append_char),
+     ("Strings", "WriteInt(x, n: INTEGER; VAR dest: ARRAY OF CHAR; at: INTEGER): INTEGER",
+      str_write_int),
+     ("Strings", "AppendInt(x, n: INTEGER; VAR dest: ARRAY OF CHAR)", str_append_int),
+     (predeclared, "WriteInt(x: INTEGER)", write_int),
+     (predeclared, "WriteChar(ch: CHAR)", out_char),
+     (predeclared, "WriteLn", out_ln),
+     (predeclared, "ReadInt(): INTEGER", read_int),
+     (predeclared, "eot(): BOOLEAN", end_of_text),
+     (predeclared, "WriteReal(x: REAL)", write_real),
+     (predeclared, "AND(x, y: INTEGER): INTEGER", bit_and),
+     (predeclared, "BOR(x, y: INTEGER): INTEGER", bit_or),
+     (predeclared, "NOT(x: INTEGER): INTEGER", bit_not));
+
+  { Math and MathL have the same contents, each function under two names. }
+  proc build_natives = [] Native_def:
+    begin [] string math_modules = ("Math", "MathL");
+          int n := UPB fixed_natives;
+          [1:n + UPB math_modules * (2 + 2 * UPB math_functions)] Native_def all;
+          all[:n] := fixed_natives;
+          proc add = (string math_module, heading, Native code) void:
+            begin n +:= 1; all[n] := (math_module, heading, code) end;
+          for m to UPB math_modules
+          do string name = math_modules[m];
+             add (name, "CONST pi = 3.141592653589793", no_operation);
+             add (name, "CONST e = 2.718281828459045", no_operation);
+             for i to UPB math_functions
+             do Math_def f = math_functions[i];
+                add (name, lower_name of f + signature of f, math_code of f);
+                add (name, capital_name of f + signature of f, math_code of f)
+             od
+          od;
+          all
+    end;
+
+  [] Native_def natives = build_natives;
+

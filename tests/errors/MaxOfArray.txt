@@ -1,0 +1,1 @@
+MaxOfArray.Mod:4:16: error: a numeric type, CHAR or SET is required

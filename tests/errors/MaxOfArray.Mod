@@ -1,0 +1,5 @@
+MODULE MaxOfArray;
+  TYPE A = ARRAY 2 OF INTEGER;
+  VAR x: INTEGER;
+BEGIN x := MAX(A)
+END MaxOfArray.

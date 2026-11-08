@@ -1,0 +1,1808 @@
+{ parser.a68 - one pass over the source parses, checks types and builds the
+  syntax tree. Every name is resolved here, so the interpreter never looks up
+  an identifier. }
+
+  { Kinds of items, the result of parsing an operand. }
+  int i_const = 1, i_var = 2, i_value = 3, i_type = 4, i_proc = 5,
+      i_builtin = 6;
+
+  mode Item = struct (int kind, ref Type type, Expr code, bool read_only,
+                      ref Object object);
+
+  mode Scope = struct (ref Object first, ref Scope outer);
+
+  { A pointer type whose base type is declared later in the same scope. }
+  mode Pending = struct (string base_name, ref Type pointer, int pending_level,
+                         ref Pending next_pending);
+
+  op SOME = (ref Pending p) bool: p isnt nil;
+
+  op NONE = (ref Scope s) bool: s is nil;
+  op SOME = (ref Scope s) bool: s isnt nil;
+
+  { Predefined procedures. Those from b_first_proper on are proper procedures. }
+  int b_abs = 1, b_odd = 2, b_lsl = 3, b_asr = 4, b_ror = 5, b_floor = 6,
+      b_flt = 7, b_ord = 8, b_chr = 9, b_len = 10, b_cap = 11, b_ash = 12,
+      b_identity = 13, b_min = 14, b_max = 15,
+      b_first_proper = 16,
+      b_inc = 16, b_dec = 17, b_incl = 18, b_excl = 19, b_assert = 20,
+      b_pack = 21, b_unpk = 22, b_new = 23, b_copy = 24, b_halt = 25;
+
+  { Types. }
+
+  proc new_type = (int form, string name) ref Type:
+    begin ref Type t = heap Type;
+          form of t := form;
+          base of t := nil;
+          length of t := 0;
+          params of t := nil;
+          result of t := nil;
+          name of t := name;
+          t
+    end;
+
+  ref Type void_type = new_type (f_void, "no type");
+  ref Type byte_type = new_type (f_byte, "BYTE");
+  ref Type int_type = new_type (f_int, "INTEGER");
+  ref Type real_type = new_type (f_real, "REAL");
+  ref Type bool_type = new_type (f_bool, "BOOLEAN");
+  ref Type char_type = new_type (f_char, "CHAR");
+  ref Type set_type = new_type (f_set, "SET");
+  ref Type nil_type = new_type (f_nil, "NIL");
+
+  proc is_integer = (ref Type t) bool: form of t = f_int orel form of t = f_byte;
+  proc is_numeric = (ref Type t) bool: is_integer (t) orel form of t = f_real;
+
+  { Scopes. }
+
+  ref ref Scope top = heap ref Scope := nil;
+  ref ref Scope universe = heap ref Scope := nil;
+  int level := 0;
+
+  proc open_scope = void:
+    begin ref Scope s = heap Scope;
+          first of s := nil;
+          outer of s := top;
+          top := s
+    end;
+
+  proc close_scope = void: top := outer of top;
+
+  proc new_object = (int class, string name, ref Type type) ref Object:
+    begin ref Object obj = heap Object;
+          class of obj := class;
+          name of obj := name;
+          type of obj := type;
+          next of obj := nil;
+          exported of obj := false;
+          level of obj := level;
+          home of obj := file_index;
+          slot of obj := 0;
+          builtin of obj := 0;
+          routine of obj := nil;
+          members of obj := nil;
+          obj
+    end;
+
+  { Appends obj to the list that starts at the variable head. }
+  proc append_object = (ref ref Object head, ref Object obj) void:
+    if NONE head
+    then head := obj
+    else ref ref Object last = heap ref Object := head;
+         while SOME next of last do last := next of last od;
+         next of last := obj
+    fi;
+
+  proc insert = (ref Object obj) void:
+    begin ref ref Object cursor = heap ref Object := first of top;
+          while SOME cursor
+          do if name of cursor = name of obj
+             then error ("multiple definition of " + name of obj)
+             fi;
+             cursor := next of cursor
+          od;
+          append_object (first of top, obj)
+    end;
+
+  proc find_in = (ref Object head, string name) ref Object:
+    begin ref ref Object cursor = heap ref Object := head;
+          while (SOME cursor | name of cursor /= name | false)
+          do cursor := next of cursor od;
+          cursor
+    end;
+
+  proc find = (string name) ref Object:
+    begin ref ref Scope s = heap ref Scope := top;
+          ref ref Object found = heap ref Object := nil;
+          while NONE found andth SOME s
+          do found := find_in (first of s, name);
+             s := outer of s
+          od;
+          found
+    end;
+
+  proc predeclare_type = (ref Type t) void:
+    insert (new_object (c_type, name of t, t));
+
+  proc predeclare_builtin = (string name, int id) void:
+    begin ref Object obj = new_object (c_builtin, name, void_type);
+          builtin of obj := id;
+          insert (obj)
+    end;
+
+  { A second predeclared name of a basic type. }
+  proc predeclare_synonym = (string name, ref Type t) void:
+    insert (new_object (c_type, name, t));
+
+  { Whether the predeclared names of the compiler oberonc are available. }
+  bool oberonc_names := false;
+
+  proc enter_universe = void:
+    begin open_scope;
+          universe := top;
+          predeclare_type (byte_type);
+          predeclare_type (int_type);
+          predeclare_type (real_type);
+          predeclare_type (bool_type);
+          predeclare_type (char_type);
+          predeclare_type (set_type);
+          predeclare_synonym ("SHORTINT", int_type);
+          predeclare_synonym ("LONGINT", int_type);
+          predeclare_synonym ("SHORTREAL", real_type);
+          predeclare_synonym ("LONGREAL", real_type);
+          predeclare_builtin ("ABS", b_abs);
+          predeclare_builtin ("ODD", b_odd);
+          predeclare_builtin ("LSL", b_lsl);
+          predeclare_builtin ("ASR", b_asr);
+          predeclare_builtin ("ROR", b_ror);
+          predeclare_builtin ("FLOOR", b_floor);
+          predeclare_builtin ("FLT", b_flt);
+          predeclare_builtin ("ORD", b_ord);
+          predeclare_builtin ("CHR", b_chr);
+          predeclare_builtin ("LEN", b_len);
+          predeclare_builtin ("NEW", b_new);
+          predeclare_builtin ("INC", b_inc);
+          predeclare_builtin ("DEC", b_dec);
+          predeclare_builtin ("INCL", b_incl);
+          predeclare_builtin ("EXCL", b_excl);
+          predeclare_builtin ("ASSERT", b_assert);
+          predeclare_builtin ("PACK", b_pack);
+          predeclare_builtin ("UNPK", b_unpk);
+          predeclare_builtin ("ENTIER", b_floor);
+          predeclare_builtin ("CAP", b_cap);
+          predeclare_builtin ("ASH", b_ash);
+          predeclare_builtin ("LONG", b_identity);
+          predeclare_builtin ("SHORT", b_identity);
+          predeclare_builtin ("MIN", b_min);
+          predeclare_builtin ("MAX", b_max);
+          predeclare_builtin ("COPY", b_copy);
+          predeclare_builtin ("HALT", b_halt);
+          if oberonc_names
+          then append_object (first of top, native_members (predeclared))
+          fi
+    end;
+
+  { Storage of variables. Globals are numbered through all modules; locals
+    are numbered per procedure, after the parameters. }
+
+  int n_slots := 0;
+  flex [1:0] Value local_inits;
+  flex [1:0] Value global_inits;
+  flex [1:0] Fresh local_objects;
+  flex [1:0] Fresh global_objects;
+
+  proc append_fresh = (ref flex [] Fresh row, Fresh f) void:
+    begin [1:UPB row + 1] Fresh grown;
+          grown[:UPB row] := row;
+          grown[UPB grown] := f;
+          row := grown
+    end;
+
+  proc fresh_copy = ([] Fresh row) ref [] Fresh:
+    begin ref [] Fresh copy = heap [1:UPB row] Fresh;
+          copy := row;
+          copy
+    end;
+
+  proc append_value = (ref flex [] Value row, Value v) void:
+    begin [1:UPB row + 1] Value grown;
+          grown[:UPB row] := row;
+          grown[UPB grown] := v;
+          row := grown
+    end;
+
+  proc declare_variable = (string name, ref Type type, bool exported) void:
+    begin ref Object obj = new_object (c_var, name, type);
+          exported of obj := exported;
+          { An array or record gets its object when the frame is set up. }
+          Value initial = (is_aggregate (type) | Value (0) | default_value (type));
+          if level = 0
+          then append_value (global_inits, initial);
+               slot of obj := UPB global_inits;
+               if is_aggregate (type)
+               then append_fresh (global_objects, (slot of obj, type))
+               fi
+          else append_value (local_inits, initial);
+               n_slots +:= 1;
+               slot of obj := n_slots;
+               if is_aggregate (type)
+               then append_fresh (local_objects, (slot of obj, type))
+               fi
+          fi;
+          insert (obj)
+    end;
+
+  { Items. }
+
+  proc const_item = (ref Type t, Value v) Item:
+    (i_const, t, const_e (v), false, nil);
+
+  proc value_item = (ref Type t, Expr e) Item:
+    (i_value, t, e, false, nil);
+
+  proc is_const = (Item x) bool: kind of x = i_const;
+
+  proc const_value = (Item x) Value:
+    case code of x in (ref Const_e c): value of c esac;
+
+  proc string_item = (string s) Item:
+    begin ref [] Value elems = heap [1:UPB s + 1] Value;
+          for i to UPB s do elems[i] := s[i] od;
+          elems[UPB elems] := REPR 0;
+          ref Array_obj a = heap Array_obj;
+          elems of a := elems;
+          ref Type t = new_type (f_string, "string");
+          length of t := UPB s;
+          const_item (t, a)
+    end;
+
+  proc is_single_char = (Item x) bool:
+    form of type of x = f_string andth length of type of x = 1;
+
+  { The character of a constant string of length 1. }
+  proc char_item = (Item x) Item:
+    case const_value (x)
+    in (ref Array_obj a): const_item (char_type, (elems of a)[1])
+    esac;
+
+  { Parsing helpers. }
+
+  proc sym_in = ([] int symbols) bool:
+    begin bool found := false;
+          for i to UPB symbols do found := found orel sym = symbols[i] od;
+          found
+    end;
+
+  proc expect = (int symbol, string what) void:
+    if sym = symbol then next else syntax_error (what + " expected") fi;
+
+  proc expect_ident = string:
+    if sym = s_ident
+    then string name = ident; next; name
+    else syntax_error ("identifier expected"); ""
+    fi;
+
+  { Expressions. }
+
+  proc unary = (int kind, ref Type t, Item x) Item:
+    if is_const (x)
+    then const_item (t, unary_op (kind, const_value (x)))
+    else ref Unary_e n = heap Unary_e;
+         kind of n := kind;
+         operand of n := code of x;
+         value_item (t, n)
+    fi;
+
+  proc to_real = (Item x) Item:
+    (form of type of x = f_real | x | unary (u_flt, real_type, x));
+
+  proc int_binary = (int kind, Item x, y) Item:
+    if (is_const (y) andth (kind = op_div orel kind = op_mod))
+       andth as_int (const_value (y)) = 0
+    then error ("division by zero"); skip
+    elif is_const (x) andth is_const (y)
+    then const_item (int_type,
+                     int_op (kind, as_int (const_value (x)),
+                             as_int (const_value (y))))
+    else value_item (int_type,
+                     heap Int_e := (kind, current_position, code of x, code of y))
+    fi;
+
+  proc real_binary = (int kind, Item a, b) Item:
+    begin Item x = to_real (a), y = to_real (b);
+          if is_const (x) andth is_const (y)
+          then const_item (real_type,
+                           real_op (kind, as_real (const_value (x)),
+                                    as_real (const_value (y))))
+          else value_item (real_type,
+                           heap Real_e := (kind, code of x, code of y))
+          fi
+    end;
+
+  proc set_binary = (int kind, Item x, y) Item:
+    if is_const (x) andth is_const (y)
+    then const_item (set_type,
+                     set_op (kind, as_set (const_value (x)),
+                             as_set (const_value (y))))
+    else value_item (set_type, heap Set_e := (kind, code of x, code of y))
+    fi;
+
+  proc arithmetic = (int kind, Item x, y) Item:
+    begin ref Type a = type of x, b = type of y;
+          if form of a = f_set andth form of b = f_set
+          then if kind = op_div orel kind = op_mod
+               then error ("bad operands for DIV or MOD")
+               fi;
+               set_binary (kind, x, y)
+          elif NOT is_numeric (a) orel NOT is_numeric (b)
+          then error ("numeric operands expected"); skip
+          elif kind = op_div orel kind = op_mod
+          then if NOT is_integer (a) orel NOT is_integer (b)
+               then error ("integer operands expected")
+               fi;
+               int_binary (kind, x, y)
+          elif (kind = op_quot orel form of a = f_real) orel form of b = f_real
+          then real_binary (kind, x, y)
+          else int_binary (kind, x, y)
+          fi
+    end;
+
+  proc logical = (bool is_and, Item x, y) Item:
+    if form of type of x /= f_bool orel form of type of y /= f_bool
+    then error ("boolean operands expected"); skip
+    elif is_const (x) andth is_const (y)
+    then bool a = as_bool (const_value (x)), b = as_bool (const_value (y));
+         const_item (bool_type, (is_and | a AND b | a OR b))
+    elif is_and
+    then value_item (bool_type, heap And_e := (code of x, code of y))
+    else value_item (bool_type, heap Or_e := (code of x, code of y))
+    fi;
+
+  proc int_relation = (int kind, Item x, y) Item:
+    if is_const (x) andth is_const (y)
+    then const_item (bool_type,
+                     int_rel (kind, as_int (const_value (x)),
+                              as_int (const_value (y))))
+    else value_item (bool_type, heap Int_rel_e := (kind, code of x, code of y))
+    fi;
+
+  proc real_relation = (int kind, Item a, b) Item:
+    begin Item x = to_real (a), y = to_real (b);
+          if is_const (x) andth is_const (y)
+          then const_item (bool_type,
+                           real_rel (kind, as_real (const_value (x)),
+                                     as_real (const_value (y))))
+          else value_item (bool_type,
+                           heap Real_rel_e := (kind, code of x, code of y))
+          fi
+    end;
+
+  proc char_relation = (int kind, Item x, y) Item:
+    if is_const (x) andth is_const (y)
+    then const_item (bool_type,
+                     char_rel (kind, as_char (const_value (x)),
+                               as_char (const_value (y))))
+    else value_item (bool_type, heap Char_rel_e := (kind, code of x, code of y))
+    fi;
+
+  proc equality = (int kind, Item x, y) Item:
+    if kind /= op_eq andth kind /= op_ne
+    then error ("only = and # apply to these operands"); skip
+    elif is_const (x) andth is_const (y)
+    then bool same = values_equal (const_value (x), const_value (y));
+         const_item (bool_type, (kind = op_eq | same | NOT same))
+    else value_item (bool_type,
+                     heap Eq_e := (kind = op_ne, code of x, code of y))
+    fi;
+
+  proc is_string = (ref Type t) bool:
+    form of t = f_string orel (form of t = f_array andth form of base of t = f_char);
+
+  proc string_relation = (int kind, Item x, y) Item:
+    if is_const (x) andth is_const (y)
+    then const_item (bool_type,
+                     int_rel (kind, string_compare (const_value (x), const_value (y)), 0))
+    else value_item (bool_type, heap Str_rel_e := (kind, code of x, code of y))
+    fi;
+
+  proc is_nil_comparable = (ref Type t) bool:
+    (form of t = f_pointer orel form of t = f_proc) orel form of t = f_nil;
+
+  { NIL takes the alternative of the union that the other operand has. }
+  proc typed_nil = (ref Type t) Item:
+    const_item (t, default_value (t));
+
+  proc comparison = (int kind, Item a, b) Item:
+    begin Item x = (is_single_char (a) andth form of type of b = f_char | char_item (a) | a);
+          Item y = (is_single_char (b) andth form of type of a = f_char | char_item (b) | b);
+          ref Type s = type of x, t = type of y;
+          if is_integer (s) andth is_integer (t)
+          then int_relation (kind, x, y)
+          elif is_numeric (s) andth is_numeric (t)
+          then real_relation (kind, x, y)
+          elif form of s = f_char andth form of t = f_char
+          then char_relation (kind, x, y)
+          elif is_single_char (x) andth is_single_char (y)
+          then char_relation (kind, char_item (x), char_item (y))
+          elif form of s = f_bool andth form of t = f_bool
+          then equality (kind, x, y)
+          elif form of s = f_set andth form of t = f_set
+          then equality (kind, x, y)
+          elif form of s = f_nil andth is_nil_comparable (t)
+          then equality (kind, typed_nil (t), y)
+          elif form of t = f_nil andth is_nil_comparable (s)
+          then equality (kind, x, typed_nil (s))
+          elif form of s = f_proc andth form of t = f_proc
+          then equality (kind, x, y)
+          elif (form of s = f_pointer andth form of t = f_pointer)
+               andth (extends (base of s, base of t) orel extends (base of t, base of s))
+          then equality (kind, x, y)
+          elif is_string (s) andth is_string (t)
+          then string_relation (kind, x, y)
+          else error ("operands of the relation are incompatible"); skip
+          fi
+    end;
+
+  proc type_equal = (ref Type a, b) bool:
+    if a is b then true
+    elif form of a = f_array andth form of b = f_array
+    then length of a = length of b andth type_equal (base of a, base of b)
+    elif form of a = f_proc andth form of b = f_proc
+    then same_signature (a, b)
+    else false
+    fi;
+
+  { Whether an array of type s can be assigned or passed to one of type t. }
+  proc array_compatible = (ref Type t, s) bool:
+    if form of t /= f_array orel form of s /= f_array then type_equal (t, s)
+    elif (length of t >= 0 andth length of s >= 0) andth length of t /= length of s
+    then false
+    else array_compatible (base of t, base of s)
+    fi;
+
+  proc same_signature = (ref Type a, b) bool:
+    begin ref ref Object p = heap ref Object := params of a;
+          ref ref Object q = heap ref Object := params of b;
+          bool same := type_equal (result of a, result of b);
+          while (same andth SOME p) andth SOME q
+          do same := class of p = class of q andth type_equal (type of p, type of q);
+             p := next of p;
+             q := next of q
+          od;
+          (same andth NONE p) andth NONE q
+    end;
+
+  { Checks that x can be assigned to a variable of type t and yields its
+    code, converted if necessary. }
+  proc converted = (ref Type t, Item x) Expr:
+    begin int f = form of t, g = form of type of x;
+          if type of x is t then code of x
+          elif f = f_byte andth g = f_int
+          then code of unary (u_byte, byte_type, x)
+          elif f = f_int andth g = f_byte then code of x
+          elif f = f_real andth is_integer (type of x)
+          then code of to_real (x)
+          elif f = f_char andth is_single_char (x)
+          then code of char_item (x)
+          elif (f = f_array andth g = f_string) andth form of base of t = f_char
+          then if length of t >= 0 andth length of type of x >= length of t
+               then error ("string too long")
+               fi;
+               code of x
+          elif f = f_array andth g = f_array
+          then if NOT array_compatible (t, type of x)
+               then error ("incompatible array types")
+               fi;
+               code of x
+          elif (f = f_record andth g = f_record) andth extends (type of x, t)
+          then code of x
+          elif (f = f_pointer andth g = f_pointer)
+               andth extends (base of type of x, base of t)
+          then code of x
+          elif (f = f_pointer orel f = f_proc) andth g = f_nil
+          then code of typed_nil (t)
+          elif (f = f_proc andth g = f_proc) andth same_signature (t, type of x)
+          then if (kind of x = i_proc andth level of object of x > 0)
+                  andth NOT oberonc_names
+               then error ("local procedure used as a value")
+               fi;
+               code of x
+          else error ("incompatible types"); skip
+          fi
+    end;
+
+  proc var_compatible = (ref Type formal, actual) bool:
+    if form of formal = f_record andth form of actual = f_record
+    then extends (actual, formal)
+    elif form of formal = f_array andth length of formal < 0
+    then array_compatible (formal, actual)
+    else type_equal (formal, actual)
+    fi;
+
+  { Out.Real and Out.LongReal can be called without a width. }
+  proc width_is_optional = (Item f) bool:
+    if kind of f = i_proc andth SOME native of routine of object of f
+    then module_name of native of routine of object of f = "Out"
+           andth (name of object of f = "Real" orel name of object of f = "LongReal")
+    else false
+    fi;
+
+  proc actual_parameters = (ref Object formals, bool has_list, optional_last) ref [] Expr:
+    begin int n := 0;
+          ref ref Object f = heap ref Object := formals;
+          while SOME f do n +:= 1; f := next of f od;
+          ref [] Expr args = heap [1:n] Expr;
+          f := formals;
+          int i := 0;
+          if has_list
+          then next;
+               if sym /= s_rparen
+               then bool more := true;
+                    while more
+                    do Item a = expression;
+                       if NONE f then error ("too many parameters") fi;
+                       i +:= 1;
+                       if class of f = c_var_par
+                       then if kind of a /= i_var orel read_only of a
+                            then error ("a variable is required")
+                            fi;
+                            if NOT var_compatible (type of f, type of a)
+                            then error ("incompatible VAR parameter")
+                            fi;
+                            args[i] := (is_aggregate (type of f) | code of a
+                                                                 | make_ref_e (code of a))
+                       else if (form of type of f = f_array andth length of type of f >= 0)
+                               andth form of type of a = f_string
+                            then error ("a string can be passed only to an open array")
+                            fi;
+                            args[i] := converted (type of f, a)
+                       fi;
+                       f := next of f;
+                       more := sym = s_comma;
+                       if more then next fi
+                    od
+               fi;
+               expect (s_rparen, ")")
+          fi;
+          if i = n - 1 andth optional_last
+          then args[n] := const_e (0)
+          elif i < n
+          then error ("too few parameters")
+          fi;
+          args
+    end;
+
+  proc call = (Item f, bool has_list) Item:
+    begin ref Type t = type of f;
+          int position = current_position;
+          ref [] Expr args = actual_parameters (params of t, has_list, width_is_optional (f));
+          Expr node =
+            if kind of f = i_proc
+            then ref Proc_def callee = routine of object of f;
+                 if SOME native of callee
+                 then heap Native_e := (code of native of callee, args)
+                 else heap Call_e := (callee, args, position)
+                 fi
+            else heap Call_var_e := (code of f, args, position)
+            fi;
+          value_item (result of t, node)
+    end;
+
+  { One argument of a predefined procedure, followed by a comma or not. }
+  proc builtin_arg = Item:
+    begin Item x = expression;
+          if sym = s_comma then next fi;
+          x
+    end;
+
+  proc require = (bool ok, string message) void:
+    if NOT ok then error (message) fi;
+
+  proc require_var = (Item x) void:
+    require (kind of x = i_var andth NOT read_only of x, "a variable is required");
+
+  proc require_int = (Item x) void:
+    require (is_integer (type of x), "integer expected");
+
+  proc shift_builtin = (int kind) Item:
+    begin Item x = builtin_arg;
+          Item n = builtin_arg;
+          require_int (x);
+          require_int (n);
+          int_binary (kind, x, n)
+    end;
+
+  { MIN or MAX of a basic type. }
+  proc limit_builtin = (bool is_min) Item:
+    begin ref Type t = qualified_type;
+          int f = form of t;
+          if f = f_int
+          then const_item (int_type, (is_min | -max_int - 1 | max_int))
+          elif f = f_byte
+          then const_item (int_type, (is_min | 0 | 255))
+          elif f = f_real
+          then const_item (real_type, (is_min | -long_max_real | long_max_real))
+          elif f = f_char
+          then const_item (char_type, REPR (is_min | 0 | 255))
+          elif f = f_set
+          then const_item (int_type, (is_min | 0 | word_bits - 1))
+          else error ("a numeric type, CHAR or SET is required"); skip
+          fi
+    end;
+
+  proc function_builtin = (int id) Item:
+    if id = b_lsl then shift_builtin (op_lsl)
+    elif id = b_asr then shift_builtin (op_asr)
+    elif id = b_ror then shift_builtin (op_ror)
+    elif id = b_ash then shift_builtin (op_ash)
+    elif id = b_min orel id = b_max then limit_builtin (id = b_min)
+    else Item x = builtin_arg;
+         ref Type t = type of x;
+         if id = b_len
+         then require (form of t = f_array, "array expected");
+              if length of t >= 0
+              then const_item (int_type, length of t)
+              else value_item (int_type, len_e (code of x))
+              fi
+         elif id = b_abs
+         then if is_integer (t) then unary (u_abs_int, t, x)
+              elif form of t = f_real then unary (u_abs_real, t, x)
+              else error ("numeric operand expected"); skip
+              fi
+         elif id = b_odd
+         then require_int (x); unary (u_odd, bool_type, x)
+         elif id = b_floor
+         then require (is_numeric (t), "numeric operand expected");
+              unary (u_floor, int_type, to_real (x))
+         elif id = b_flt
+         then require_int (x); to_real (x)
+         elif id = b_chr
+         then require_int (x); unary (u_chr, char_type, x)
+         elif id = b_cap
+         then Item c = (is_single_char (x) | char_item (x) | x);
+              require (form of type of c = f_char, "CHAR expected");
+              unary (u_cap, char_type, c)
+         elif id = b_identity
+         then require (is_numeric (t), "numeric operand expected");
+              (is_const (x) | x | value_item (t, code of x))
+         else { ORD }
+              if form of t = f_char then unary (u_ord_char, int_type, x)
+              elif is_single_char (x) then unary (u_ord_char, int_type, char_item (x))
+              elif form of t = f_bool then unary (u_ord_bool, int_type, x)
+              elif form of t = f_set then unary (u_ord_set, int_type, x)
+              elif is_integer (t) then value_item (int_type, code of x)
+              else error ("bad operand of ORD"); skip
+              fi
+         fi
+    fi;
+
+  proc seq_of = (Stmt s) ref Seq: heap Seq := (s, nil);
+
+  { A statement that calls a routine of the library. }
+  proc native_statement = (Native code, [] Expr arguments) ref Seq:
+    begin ref [] Expr args = heap [1:UPB arguments] Expr;
+          args := arguments;
+          seq_of (call_s (heap Native_e := (code, args)))
+    end;
+
+  proc proper_builtin = (int id) ref Seq:
+    begin Item x = builtin_arg;
+          if id = b_inc orel id = b_dec
+          then require_var (x);
+               require_int (x);
+               Item amount = (sym /= s_rparen | builtin_arg | const_item (int_type, 1));
+               require_int (amount);
+               Item delta = (id = b_inc | amount | unary (u_neg_int, int_type, amount));
+               seq_of (heap Inc_s := (code of x, code of delta,
+                                      form of type of x = f_byte))
+          elif id = b_incl orel id = b_excl
+          then require_var (x);
+               require (form of type of x = f_set, "SET expected");
+               Item e = builtin_arg;
+               require_int (e);
+               seq_of (heap Set_elem_s := (code of x, code of e, id = b_incl))
+          elif id = b_new
+          then require_var (x);
+               require (form of type of x = f_pointer, "pointer expected");
+               seq_of (heap New_s := (code of x, base of type of x))
+          elif id = b_assert
+          then require (form of type of x = f_bool, "BOOLEAN expected");
+               seq_of (heap Assert_s := (code of x, current_position))
+          elif id = b_halt
+          then require_int (x);
+               native_statement (halt_program, code of x)
+          elif id = b_copy
+          then require (is_string (type of x), "a string is required");
+               Item target = builtin_arg;
+               require_var (target);
+               require (form of type of target = f_array
+                          andth form of base of type of target = f_char,
+                        "an array of characters is required");
+               native_statement (copy_string, (code of x, code of target))
+          else require_var (x);
+               require (form of type of x = f_real, "REAL expected");
+               Item n = builtin_arg;
+               require_int (n);
+               if id = b_pack
+               then seq_of (heap Pack_s := (code of x, code of n))
+               else require_var (n);
+                    seq_of (heap Unpk_s := (code of x, code of n))
+               fi
+          fi
+    end;
+
+  proc item_of_object = (ref Object obj, bool imported) Item:
+    begin int c = class of obj;
+          if (c = c_var orel c = c_par) orel c = c_var_par
+          then if level of obj > 0 andth level of obj /= level
+               then error (name of obj + " is not accessible here")
+               fi
+          fi;
+          if c = c_const
+          then const_item (type of obj, value of obj)
+          elif c = c_var
+          then (i_var, type of obj,
+                (level of obj = 0 | global_e (slot of obj) | local_e (slot of obj)),
+                imported, obj)
+          elif c = c_par
+          then (i_var, type of obj, local_e (slot of obj),
+                is_aggregate (type of obj), obj)
+          elif c = c_var_par
+          then (i_var, type of obj,
+                (is_aggregate (type of obj) | local_e (slot of obj)
+                                            | var_par_e (slot of obj)),
+                false, obj)
+          elif c = c_type
+          then (i_type, type of obj, const_e (0), false, obj)
+          elif c = c_proc
+          then (i_proc, type of obj, const_e (routine of obj), false, obj)
+          elif c = c_builtin
+          then (i_builtin, void_type, const_e (0), false, obj)
+          elif c = c_reader
+          then value_item (type of obj,
+                           heap Native_e := (code of native of routine of obj,
+                                             heap [1:0] Expr))
+          else error (name of obj + " cannot be used here"); skip
+          fi
+    end;
+
+  proc find_field = (ref Type record, string name) ref Object:
+    begin ref ref Type t = heap ref Type := record;
+          ref ref Object found = heap ref Object := nil;
+          while NONE found andth SOME t
+          do found := find_in (params of t, name);
+             t := base of t
+          od;
+          found
+    end;
+
+  proc dereference = (Item x) Item:
+    (i_var, base of type of x, heap Deref_e := (code of x, current_position), false, nil);
+
+  proc field_selector = (Item operand) Item:
+    begin Item x = (form of type of operand = f_pointer | dereference (operand) | operand);
+          require (form of type of x = f_record, "not a record");
+          string name = expect_ident;
+          ref Object f = find_field (type of x, name);
+          if NONE f then error ("undefined field " + name) fi;
+          if NOT exported of f andth home of f /= file_index
+          then error ("the field " + name + " is not exported")
+          fi;
+          (i_var, type of f, heap Field_e := (code of x, slot of f), read_only of x, nil)
+    end;
+
+  proc index_selector = (Item x) Item:
+    begin require (form of type of x = f_array, "not an array");
+          Item i = expression;
+          require_int (i);
+          if is_const (i) andth length of type of x >= 0
+          then int v = as_int (const_value (i));
+               require (v >= 0 andth v < length of type of x, "index out of range")
+          fi;
+          (i_var, base of type of x,
+           heap Index_e := (code of x, code of i, current_position),
+           read_only of x, nil)
+    end;
+
+  { Checks a type test or guard of x for the type t, and yields the record type
+    to test. }
+  proc guard_target = (Item x, ref Type t) ref Type:
+    begin ref Type declared = type of x;
+          if form of declared = f_pointer andth form of t = f_pointer
+          then require (extends (base of t, base of declared),
+                        "the type must be an extension");
+               base of t
+          elif form of declared = f_record andth form of t = f_record
+          then require (SOME object of x andth class of object of x = c_var_par,
+                        "a variable parameter is required");
+               require (extends (t, declared), "the type must be an extension");
+               t
+          else error ("a pointer or record type is required"); skip
+          fi
+    end;
+
+  proc selectors = (Item first) Item:
+    begin Item x := first;
+          bool more := true;
+          while more
+          do int f = form of type of x;
+             if kind of x /= i_var
+             then more := false
+             elif sym = s_period
+             then next; x := field_selector (x)
+             elif sym = s_lbrak
+             then next;
+                  x := index_selector (x);
+                  while sym = s_comma do next; x := index_selector (x) od;
+                  expect (s_rbrak, "]")
+             elif sym = s_caret
+             then require (f = f_pointer, "not a pointer");
+                  next;
+                  x := dereference (x)
+             elif sym = s_lparen andth (f = f_pointer orel f = f_record)
+             then next;
+                  ref Type t = qualified_type;
+                  expect (s_rparen, ")");
+                  ref Type target = guard_target (x, t);
+                  x := (i_var, t,
+                        heap Guard_e := (code of x, target, current_position),
+                        read_only of x, nil)
+             else more := false
+             fi
+          od;
+          x
+    end;
+
+  proc designator = Item:
+    begin string name = expect_ident;
+          ref Object found = find (name);
+          if found is nil then error ("undeclared identifier " + name) fi;
+          if class of found = c_module
+          then expect (s_period, ".");
+               string member = expect_ident;
+               ref Object obj = find_in (members of found, member);
+               if (obj is nil) orel NOT exported of obj
+               then error (name + "." + member + " is not exported")
+               fi;
+               selectors (item_of_object (obj, true))
+          else selectors (item_of_object (found, false))
+          fi
+    end;
+
+  proc set_element = Item:
+    begin Item low = expression;
+          require_int (low);
+          if sym = s_upto
+          then next;
+               Item high = expression;
+               require_int (high);
+               if is_const (low) andth is_const (high)
+               then const_item (set_type,
+                                range_set (as_int (const_value (low)),
+                                           as_int (const_value (high))))
+               else value_item (set_type, heap Range_e := (code of low, code of high))
+               fi
+          else unary (u_singleton, set_type, low)
+          fi
+    end;
+
+  proc set_constructor = Item:
+    begin Item result := const_item (set_type, BIN 0);
+          next;
+          if sym /= s_rbrace
+          then bool more := true;
+               while more
+               do result := set_binary (op_add, result, set_element);
+                  more := sym = s_comma;
+                  if more then next fi
+               od
+          fi;
+          expect (s_rbrace, "}");
+          result
+    end;
+
+  proc factor = Item:
+    if sym = s_integer
+    then int v = int_value; next; const_item (int_type, v)
+    elif sym = s_real
+    then long real v = real_value; next; const_item (real_type, v)
+    elif sym = s_string
+    then string s = string_value; next; string_item (s)
+    elif sym = s_nil
+    then next; const_item (nil_type, ref Record_obj (nil))
+    elif sym = s_true
+    then next; const_item (bool_type, true)
+    elif sym = s_false
+    then next; const_item (bool_type, false)
+    elif sym = s_lbrace
+    then set_constructor
+    elif sym = s_lparen
+    then next;
+         Item x = expression;
+         expect (s_rparen, ")");
+         x
+    elif sym = s_not
+    then next;
+         Item x = factor;
+         require (form of type of x = f_bool, "BOOLEAN expected");
+         if is_const (x)
+         then const_item (bool_type, NOT as_bool (const_value (x)))
+         else value_item (bool_type, not_e (code of x))
+         fi
+    elif sym = s_ident
+    then Item x = designator;
+         if kind of x = i_builtin
+         then int id = builtin of object of x;
+              require (id < b_first_proper, "not a function");
+              expect (s_lparen, "(");
+              Item result = function_builtin (id);
+              expect (s_rparen, ")");
+              result
+         elif kind of x = i_type
+         then error ("a type cannot be used as a value"); skip
+         elif sym = s_lparen
+         then require (form of type of x = f_proc, "not a procedure");
+              require (result of type of x isnt void_type, "not a function");
+              call (x, true)
+         else x
+         fi
+    else syntax_error ("expression expected"); skip
+    fi;
+
+  proc term = Item:
+    begin Item x := factor;
+          while sym_in ((s_times, s_slash, s_div, s_mod, s_and))
+          do int operator = sym;
+             next;
+             Item y = factor;
+             x := if operator = s_times then arithmetic (op_mul, x, y)
+                  elif operator = s_slash then arithmetic (op_quot, x, y)
+                  elif operator = s_div then arithmetic (op_div, x, y)
+                  elif operator = s_mod then arithmetic (op_mod, x, y)
+                  else logical (true, x, y)
+                  fi
+          od;
+          x
+    end;
+
+  proc simple_expression = Item:
+    begin Item x := if sym = s_minus
+                    then next;
+                         Item t = term;
+                         ref Type m = type of t;
+                         if is_integer (m) then unary (u_neg_int, int_type, t)
+                         elif form of m = f_real then unary (u_neg_real, real_type, t)
+                         elif form of m = f_set then unary (u_compl_set, set_type, t)
+                         else error ("bad operand of unary minus"); skip
+                         fi
+                    elif sym = s_plus
+                    then next;
+                         Item t = term;
+                         require (is_numeric (type of t), "numeric operand expected");
+                         t
+                    else term
+                    fi;
+          while sym_in ((s_plus, s_minus, s_or))
+          do int operator = sym;
+             next;
+             Item y = term;
+             x := if operator = s_plus then arithmetic (op_add, x, y)
+                  elif operator = s_minus then arithmetic (op_sub, x, y)
+                  else logical (false, x, y)
+                  fi
+          od;
+          x
+    end;
+
+  proc expression = Item:
+    begin Item x = simple_expression;
+          if sym_in ((s_eql, s_neq, s_lss, s_leq, s_gtr, s_geq))
+          then int relation = sym;
+               next;
+               Item y = simple_expression;
+               comparison (if relation = s_eql then op_eq
+                           elif relation = s_neq then op_ne
+                           elif relation = s_lss then op_lt
+                           elif relation = s_leq then op_le
+                           elif relation = s_gtr then op_gt
+                           else op_ge
+                           fi, x, y)
+          elif sym = s_in
+          then next;
+               Item y = simple_expression;
+               require_int (x);
+               require (form of type of y = f_set, "SET expected");
+               if is_const (x) andth is_const (y)
+               then const_item (bool_type,
+                                set_contains (as_set (const_value (y)),
+                                              as_int (const_value (x))))
+               else value_item (bool_type, heap In_e := (code of x, code of y))
+               fi
+          elif sym = s_is
+          then next;
+               ref Type t = qualified_type;
+               value_item (bool_type, heap Is_e := (code of x, guard_target (x, t)))
+          else x
+          fi
+    end;
+
+  { Statements. }
+
+  proc append_guarded = (ref flex [] Guarded row, Guarded g) void:
+    begin [1:UPB row + 1] Guarded grown;
+          grown[:UPB row] := row;
+          grown[UPB grown] := g;
+          row := grown
+    end;
+
+  proc boolean_expression = Expr:
+    begin Item x = expression;
+          require (form of type of x = f_bool, "BOOLEAN expected");
+          code of x
+    end;
+
+  proc if_statement = Stmt:
+    begin flex [1:0] Guarded branches;
+          ref Seq otherwise := nil;
+          bool more := true;
+          next;
+          while more
+          do Expr test = boolean_expression;
+             expect (s_then, "THEN");
+             append_guarded (branches, (test, statement_sequence));
+             more := sym = s_elsif;
+             if more then next fi
+          od;
+          if sym = s_else then next; otherwise := statement_sequence fi;
+          expect (s_end, "END");
+          ref [] Guarded row = heap [1:UPB branches] Guarded;
+          row := branches;
+          heap If_s := (row, otherwise)
+    end;
+
+  proc while_statement = Stmt:
+    begin flex [1:0] Guarded branches;
+          bool more := true;
+          next;
+          while more
+          do Expr test = boolean_expression;
+             expect (s_do, "DO");
+             append_guarded (branches, (test, statement_sequence));
+             more := sym = s_elsif;
+             if more then next fi
+          od;
+          expect (s_end, "END");
+          ref [] Guarded row = heap [1:UPB branches] Guarded;
+          row := branches;
+          while_s (row)
+    end;
+
+  proc repeat_statement = Stmt:
+    begin next;
+          ref Seq body = statement_sequence;
+          expect (s_until, "UNTIL");
+          Expr test = boolean_expression;
+          heap Repeat_s := (body, test)
+    end;
+
+  proc for_statement = Stmt:
+    begin next;
+          Item v = designator;
+          require_var (v);
+          require (SOME object of v
+                     andth (form of type of v = f_int
+                            orel (oberonc_names andth form of type of v = f_byte)),
+                   "INTEGER variable expected");
+          expect (s_becomes, ":=");
+          Item first = expression;
+          require_int (first);
+          expect (s_to, "TO");
+          Item last = expression;
+          require_int (last);
+          int step := 1;
+          if sym = s_by
+          then next;
+               Item by_value = expression;
+               require (is_const (by_value) andth is_integer (type of by_value),
+                        "integer constant expected");
+               step := as_int (const_value (by_value));
+               require (step /= 0, "the step must not be zero")
+          fi;
+          expect (s_do, "DO");
+          ref Seq body = statement_sequence;
+          expect (s_end, "END");
+          heap For_s := (code of v, code of first, code of last, step, body)
+    end;
+
+  { The value of a constant case label, as an int. }
+  proc case_label = (bool is_char) int:
+    begin Item x = expression;
+          require (is_const (x), "constant label expected");
+          if is_char
+          then require (form of type of x = f_char orel is_single_char (x),
+                        "character label expected");
+               ABS as_char (const_value (if is_single_char (x) then char_item (x) else x fi))
+          else require_int (x);
+               as_int (const_value (x))
+          fi
+    end;
+
+  proc append_range = (ref flex [] Case_range row, Case_range r) void:
+    begin [1:UPB row + 1] Case_range grown;
+          grown[:UPB row] := row;
+          grown[UPB grown] := r;
+          row := grown
+    end;
+
+  proc append_arm = (ref flex [] Case_arm row, Case_arm a) void:
+    begin [1:UPB row + 1] Case_arm grown;
+          grown[:UPB row] := row;
+          grown[UPB grown] := a;
+          row := grown
+    end;
+
+  proc overlaps = ([] Case_arm arms, [] Case_range labels, Case_range r) bool:
+    begin bool found := false;
+          for i to UPB labels
+          do found := found orel (low of r <= high of labels[i]
+                                  andth high of r >= low of labels[i])
+          od;
+          for a to UPB arms
+          do [] Case_range other = labels of arms[a];
+             for i to UPB other
+             do found := found orel (low of r <= high of other[i]
+                                     andth high of r >= low of other[i])
+             od
+          od;
+          found
+    end;
+
+  proc case_statement = Stmt:
+    begin int position = symbol_position;
+          next;
+          Item first_selector = expression;
+          Item selector = (is_single_char (first_selector) | char_item (first_selector)
+                                                           | first_selector);
+          if form of type of selector = f_pointer orel form of type of selector = f_record
+          then type_case (selector)
+          else
+          bool is_char = form of type of selector = f_char;
+          require (is_char orel is_integer (type of selector),
+                   "INTEGER or CHAR expected");
+          expect (s_of, "OF");
+          flex [1:0] Case_arm arms;
+          bool more := true;
+          while more
+          do if sym /= s_bar andth sym /= s_end
+             then flex [1:0] Case_range labels;
+                  bool more_labels := true;
+                  while more_labels
+                  do int low = case_label (is_char);
+                     int high = (sym = s_upto | next; case_label (is_char) | low);
+                     Case_range r = (low, high);
+                     require (low <= high, "empty label range");
+                     require (NOT overlaps (arms, labels, r), "multiple case labels");
+                     append_range (labels, r);
+                     more_labels := sym = s_comma;
+                     if more_labels then next fi
+                  od;
+                  expect (s_colon, ":");
+                  ref [] Case_range row = heap [1:UPB labels] Case_range;
+                  row := labels;
+                  append_arm (arms, (row, statement_sequence))
+             fi;
+             more := sym = s_bar;
+             if more then next fi
+          od;
+          expect (s_end, "END");
+          ref [] Case_arm row = heap [1:UPB arms] Case_arm;
+          row := arms;
+          heap Case_s := (code of selector, is_char, row, position)
+          fi
+    end;
+
+  { In the arm of a type T, the case variable has the type T. }
+  proc type_case = (Item selector) Stmt:
+    begin require (SOME object of selector, "the selector must be a variable");
+          ref Object variable = object of selector;
+          ref Type declared = type of variable;
+          flex [1:0] Type_arm arms;
+          bool more := true;
+          expect (s_of, "OF");
+          while more
+          do if sym /= s_bar andth sym /= s_end
+             then ref Type label = qualified_type;
+                  ref Type target = guard_target (selector, label);
+                  expect (s_colon, ":");
+                  type of variable := label;
+                  ref Seq body = statement_sequence;
+                  type of variable := declared;
+                  [1:UPB arms + 1] Type_arm grown;
+                  grown[:UPB arms] := arms;
+                  grown[UPB grown] := (target, body);
+                  arms := grown
+             fi;
+             more := sym = s_bar;
+             if more then next fi
+          od;
+          expect (s_end, "END");
+          ref [] Type_arm row = heap [1:UPB arms] Type_arm;
+          row := arms;
+          heap Type_case_s := (code of selector, row)
+    end;
+
+  proc assignment = (Item target) ref Seq:
+    begin require (kind of target = i_var, "a variable is required");
+          require (NOT read_only of target, "read-only variable");
+          next;
+          Item source = expression;
+          ref Type t = type of target;
+          if (form of t = f_array andth length of t < 0) andth form of type of source = f_array
+          then error ("an open array cannot be assigned to")
+          fi;
+          Expr value = converted (t, source);
+          seq_of (if is_aggregate (t)
+                  then heap Copy_s := (code of target, value, t, current_position)
+                  else case code of target
+                       in (ref Local_e v): Stmt (heap Assign_local_s := (slot of v, value))
+                       out Stmt (heap Assign_s := (code of target, value))
+                       esac
+                  fi)
+    end;
+
+  proc call_statement = (Item x) ref Seq:
+    begin require (form of type of x = f_proc, "not a procedure");
+          require (result of type of x is void_type,
+                   "the result of a function must be used");
+          seq_of (call_s (code of call (x, sym = s_lparen)))
+    end;
+
+  proc statement = ref Seq:
+    if sym = s_ident
+    then Item x = designator;
+         if sym = s_becomes
+         then assignment (x)
+         elif kind of x = i_builtin
+         then int id = builtin of object of x;
+              require (id >= b_first_proper, "not a proper procedure");
+              expect (s_lparen, "(");
+              ref Seq s = proper_builtin (id);
+              expect (s_rparen, ")");
+              s
+         else call_statement (x)
+         fi
+    elif sym = s_if then seq_of (if_statement)
+    elif sym = s_while then seq_of (while_statement)
+    elif sym = s_repeat then seq_of (repeat_statement)
+    elif sym = s_for then seq_of (for_statement)
+    elif sym = s_case then seq_of (case_statement)
+    else nil
+    fi;
+
+  proc statement_sequence = ref Seq:
+    begin ref ref Seq head = heap ref Seq := nil;
+          ref ref Seq tail = heap ref Seq := nil;
+          bool more := true;
+          while more
+          do ref Seq s = statement;
+             if s isnt nil
+             then if NONE head then head := s else next of tail := s fi;
+                  tail := s
+             fi;
+             more := sym = s_semicolon;
+             if more then next fi
+          od;
+          head
+    end;
+
+  { Types and declarations. }
+
+  proc qualified_type = ref Type:
+    begin Item x = designator;
+          if kind of x /= i_type then error ("a type is required") fi;
+          type of x
+    end;
+
+  proc procedure_type = ref Type:
+    begin ref Type t = new_type (f_proc, "PROCEDURE");
+          result of t := void_type;
+          if sym = s_lparen then formal_parameters (t) fi;
+          t
+    end;
+
+  proc array_type = ref Type:
+    begin Item n = expression;
+          require (is_const (n) andth is_integer (type of n), "constant length expected");
+          require (as_int (const_value (n)) >= 0, "the length must not be negative");
+          ref Type t = new_type (f_array, "array");
+          length of t := as_int (const_value (n));
+          if sym = s_comma
+          then next; base of t := array_type
+          else expect (s_of, "OF"); base of t := type_expression
+          fi;
+          t
+    end;
+
+  proc record_type = ref Type:
+    begin ref Type t = new_type (f_record, "record");
+          if sym = s_lparen
+          then next;
+               ref Type b = qualified_type;
+               ref Type parent = (form of b = f_pointer | base of b | b);
+               require (SOME parent andth form of parent = f_record,
+                        "the base type must be a record");
+               base of t := parent;
+               length of t := length of parent;
+               expect (s_rparen, ")")
+          fi;
+          while sym = s_ident
+          do ref ref Object section = heap ref Object := nil;
+             bool more_names := true;
+             while more_names
+             do bool exported;
+                string name = identdef (exported);
+                if SOME find_field (t, name) orel SOME find_in (section, name)
+                then error ("multiple definition of " + name)
+                fi;
+                ref Object field = new_object (c_field, name, void_type);
+                exported of field := exported;
+                append_object (section, field);
+                more_names := sym = s_comma;
+                if more_names then next fi
+             od;
+             expect (s_colon, ":");
+             ref Type field_type = type_expression;
+             ref ref Object f = heap ref Object := section;
+             while SOME f
+             do length of t +:= 1;
+                slot of f := length of t;
+                type of f := field_type;
+                f := next of f
+             od;
+             append_object (params of t, section);
+             if sym = s_semicolon then next fi
+          od;
+          expect (s_end, "END");
+          t
+    end;
+
+  ref ref Pending pending = heap ref Pending := nil;
+
+  proc pointer_type = ref Type:
+    begin expect (s_to, "TO");
+          ref Type t = new_type (f_pointer, "pointer");
+          if sym = s_ident andth NONE type_named (ident)
+          then pending := heap Pending := (ident, t, level, pending);
+               next
+          else ref Type b = type_expression;
+               require (form of b = f_record, "a pointer must point to a record");
+               base of t := b
+          fi;
+          t
+    end;
+
+  { The type declared with the given name, or nil. }
+  proc type_named = (string name) ref Type:
+    begin ref Object found = find (name);
+          if SOME found
+          then (class of found = c_type orel class of found = c_module | type of found | nil)
+          else nil
+          fi
+    end;
+
+  { The type t has just been declared with the given name. }
+  proc resolve_pending = (string name, ref Type t) void:
+    begin ref ref Pending p = heap ref Pending := pending;
+          while SOME p
+          do if pending_level of p = level andth base_name of p = name
+             then require (form of t = f_record, "a pointer must point to a record");
+                  base of pointer of p := t;
+                  base_name of p := ""
+             fi;
+             p := next_pending of p
+          od
+    end;
+
+  proc check_pending = void:
+    begin ref ref Pending p = heap ref Pending := pending;
+          while SOME p
+          do if pending_level of p = level andth UPB base_name of p > 0
+             then error ("undefined type " + base_name of p)
+             fi;
+             p := next_pending of p
+          od
+    end;
+
+  proc type_expression = ref Type:
+    if sym = s_ident then qualified_type
+    elif sym = s_array then next; array_type
+    elif sym = s_record then next; record_type
+    elif sym = s_pointer then next; pointer_type
+    elif sym = s_procedure then next; procedure_type
+    else syntax_error ("a type is required"); skip
+    fi;
+
+  proc formal_type = ref Type:
+    if sym = s_array
+    then next;
+         expect (s_of, "OF");
+         ref Type t = new_type (f_array, "open array");
+         length of t := -1;
+         base of t := formal_type;
+         t
+    elif sym = s_procedure
+    then next; procedure_type
+    else qualified_type
+    fi;
+
+  proc formal_parameters = (ref Type t) void:
+    begin next;
+          int n := 0;
+          if sym /= s_rparen
+          then bool more := true;
+               while more
+               do int class = (sym = s_var | next; c_var_par | c_par);
+                  ref ref Object section = heap ref Object := nil;
+                  bool more_names := true;
+                  while more_names
+                  do n +:= 1;
+                     ref Object parameter = new_object (class, expect_ident, void_type);
+                     slot of parameter := n;
+                     append_object (section, parameter);
+                     more_names := sym = s_comma;
+                     if more_names then next fi
+                  od;
+                  expect (s_colon, ":");
+                  ref Type par_type = formal_type;
+                  ref ref Object p = heap ref Object := section;
+                  while SOME p do type of p := par_type; p := next of p od;
+                  append_object (params of t, section);
+                  more := sym = s_semicolon;
+                  if more then next fi
+               od
+          fi;
+          expect (s_rparen, ")");
+          if sym = s_colon
+          then next;
+               result of t := qualified_type;
+               require (NOT is_aggregate (result of t),
+                        "the result of a function cannot be an array or a record")
+          fi
+    end;
+
+  proc identdef = (ref bool exported) string:
+    begin string name = expect_ident;
+          exported := sym = s_times;
+          if exported then next fi;
+          name
+    end;
+
+  proc const_declarations = void:
+    begin next;
+          while sym = s_ident
+          do bool exported;
+             string name = identdef (exported);
+             expect (s_eql, "=");
+             Item x = expression;
+             require (is_const (x), "a constant expression is required");
+             ref Object obj = new_object (c_const, name, type of x);
+             value of obj := const_value (x);
+             exported of obj := exported;
+             insert (obj);
+             expect (s_semicolon, ";")
+          od
+    end;
+
+  proc type_declarations = void:
+    begin next;
+          while sym = s_ident
+          do bool exported;
+             string name = identdef (exported);
+             expect (s_eql, "=");
+             ref Type t = type_expression;
+             ref Object obj = new_object (c_type, name, t);
+             exported of obj := exported;
+             insert (obj);
+             resolve_pending (name, t);
+             expect (s_semicolon, ";")
+          od
+    end;
+
+  proc variable_declarations = void:
+    begin next;
+          while sym = s_ident
+          do flex [1:0] string names;
+             flex [1:0] bool marks;
+             bool more := true;
+             while more
+             do bool exported;
+                string name = identdef (exported);
+                [1:UPB names + 1] string grown;
+                grown[:UPB names] := names;
+                grown[UPB grown] := name;
+                names := grown;
+                [1:UPB marks + 1] bool marked;
+                marked[:UPB marks] := marks;
+                marked[UPB marked] := exported;
+                marks := marked;
+                more := sym = s_comma;
+                if more then next fi
+             od;
+             expect (s_colon, ":");
+             ref Type t = type_expression;
+             for i to UPB names do declare_variable (names[i], t, marks[i]) od;
+             expect (s_semicolon, ";")
+          od
+    end;
+
+  proc procedure_declaration = void:
+    begin next;
+          bool exported;
+          string name = identdef (exported);
+          ref Type t = procedure_type;
+          ref Object obj = new_object (c_proc, name, t);
+          exported of obj := exported;
+          ref Proc_def def_ = heap Proc_def;
+          name of def_ := name;
+          body of def_ := nil;
+          has_result of def_ := false;
+          native of def_ := nil;
+          routine of obj := def_;
+          insert (obj);
+          expect (s_semicolon, ";");
+
+          int saved_slots = n_slots;
+          [] Value saved_inits = local_inits;
+          [] Fresh saved_objects = local_objects;
+          level +:= 1;
+          open_scope;
+          n_slots := 0;
+          local_inits := heap [1:0] Value;
+          local_objects := heap [1:0] Fresh;
+          ref ref Object p = heap ref Object := params of t;
+          while SOME p
+          do ref Object copy = new_object (class of p, name of p, type of p);
+             slot of copy := slot of p;
+             n_slots +:= 1;
+             insert (copy);
+             p := next of p
+          od;
+          n_params of def_ := n_slots;
+          declarations;
+          if sym = s_begin then next; body of def_ := statement_sequence fi;
+          if sym = s_return
+          then require (result of t isnt void_type,
+                        "a proper procedure cannot return a value");
+               next;
+               Item x = expression;
+               result of def_ := converted (result of t, x);
+               has_result of def_ := true;
+               if sym = s_semicolon then next fi
+          elif result of t isnt void_type
+          then syntax_error ("RETURN expected")
+          fi;
+          expect (s_end, "END");
+          string closing = expect_ident;
+          require (closing = name, "the name after END does not match");
+          n_slots of def_ := n_slots;
+          ref [] Value locals = heap [1:UPB local_inits] Value;
+          locals := local_inits;
+          locals of def_ := locals;
+          fresh of def_ := fresh_copy (local_objects);
+          close_scope;
+          level -:= 1;
+          n_slots := saved_slots;
+          local_inits := saved_inits;
+          local_objects := saved_objects
+    end;
+
+  proc declarations = void:
+    begin while sym_in ((s_const, s_type, s_var, s_procedure))
+          do if sym = s_const then const_declarations
+             elif sym = s_type then type_declarations
+             elif sym = s_var then variable_declarations
+             else check_pending;
+                  procedure_declaration;
+                  expect (s_semicolon, ";")
+             fi
+          od;
+          check_pending
+    end;
+
+  { Modules. }
+
+  { One object of a built-in module, from its entry in the table of the
+    library. The current symbol is the first of the heading. }
+  proc native_member = (ref Native_def entry) ref Object:
+    if sym = s_const
+    then next;
+         string name = expect_ident;
+         expect (s_eql, "=");
+         Item x = expression;
+         ref Object obj = new_object (c_const, name, type of x);
+         value of obj := const_value (x);
+         obj
+    else bool is_reader = sym = s_var;
+         if is_reader then next fi;
+         string name = expect_ident;
+         ref Type t = if is_reader
+                      then expect (s_colon, ":"); qualified_type
+                      else procedure_type
+                      fi;
+         ref Object obj = new_object ((is_reader | c_reader | c_proc), name, t);
+         ref Proc_def def_ = heap Proc_def;
+         name of def_ := name;
+         n_params of def_ := 0;
+         n_slots of def_ := 0;
+         body of def_ := nil;
+         has_result of def_ := (is_reader | false | result of t isnt void_type);
+         locals of def_ := heap [1:0] Value;
+         fresh of def_ := heap [1:0] Fresh;
+         native of def_ := entry;
+         routine of obj := def_;
+         obj
+    fi;
+
+  { Declares the objects of a built-in module, from the headings in the table
+    of the library. The result is empty if there is no such module. }
+  proc native_members = (string module_name) ref Object:
+    begin ref ref Object members = heap ref Object := nil;
+          Scanner_state state = save_scanner;
+          for i to UPB natives
+          do if module_name of natives[i] = module_name
+             then open_text (module_name, heading of natives[i]);
+                  next;
+                  ref Object obj = native_member (heap Native_def := natives[i]);
+                  exported of obj := true;
+                  level of obj := 0;
+                  append_object (members, obj)
+             fi
+          od;
+          restore_scanner (state);
+          members
+    end;
+
+  { The modules met so far. A module that is not finished is being parsed, so
+    importing it again is a cycle. }
+  mode Loaded = struct (string loaded_name, ref Object loaded_members, bool finished,
+                        ref Loaded next_loaded);
+
+  op SOME = (ref Loaded x) bool: x isnt nil;
+
+  ref ref Loaded loaded = heap ref Loaded := nil;
+
+  ref ref Module_def first_module = heap ref Module_def := nil;
+  ref ref Module_def last_module = heap ref Module_def := nil;
+
+  { The directories given on the command line. }
+  flex [1:0] string search_path;
+
+  proc add_search_directory = (string directory) void:
+    begin [1:UPB search_path + 1] string grown;
+          grown[:UPB search_path] := search_path;
+          grown[UPB grown] := directory;
+          search_path := grown
+    end;
+
+  proc find_loaded = (string name) ref Loaded:
+    begin ref ref Loaded cursor = heap ref Loaded := loaded;
+          while (SOME cursor | loaded_name of cursor /= name | false)
+          do cursor := next_loaded of cursor od;
+          cursor
+    end;
+
+  proc note_loaded = (string name, ref Object members) ref Loaded:
+    begin ref Loaded entry = heap Loaded := (name, members, false, loaded);
+          loaded := entry;
+          entry
+    end;
+
+  { The directory of a file name, with its final separator. }
+  proc directory_of = (string file_name) string:
+    begin int last := UPB file_name;
+          while (last > 0 | file_name[last] /= "/" andth file_name[last] /= "\" | false)
+          do last -:= 1 od;
+          file_name[:last]
+    end;
+
+  { Reads the source of a module from the directory of the importing file or
+    from a directory of the search path. }
+  proc find_source = (string name, ref string path, ref bool found) ref [] char:
+    begin path := directory_of (file_names[file_index]) + name + ".Mod";
+          ref ref [] char contents = heap ref [] char := read_file (path, found);
+          for i to UPB search_path while NOT found
+          do path := search_path[i] + "/" + name + ".Mod";
+             contents := read_file (path, found)
+          od;
+          contents
+    end;
+
+  proc parse_imported = (string name, path, ref [] char contents) void:
+    begin Scanner_state state = save_scanner;
+          ref Scope importer = top;
+          top := universe;
+          open_source (path, contents);
+          next;
+          module_declaration (name);
+          top := importer;
+          restore_scanner (state)
+    end;
+
+  { The objects of the module with the given name, parsing it if necessary. A
+    file of that name takes precedence over a built-in module. }
+  proc import_module = (string name) ref Object:
+    begin ref Loaded entry = find_loaded (name);
+          if SOME entry
+          then if NOT finished of entry then error ("recursive import of " + name) fi;
+               loaded_members of entry
+          else string path;
+               bool found;
+               ref [] char contents = find_source (name, path, found);
+               if found
+               then parse_imported (name, path, contents);
+                    loaded_members of find_loaded (name)
+               else ref Object members = native_members (name);
+                    if NONE members then error ("module " + name + " not found") fi;
+                    finished of note_loaded (name, members) := true;
+                    members
+               fi
+          fi
+    end;
+
+  proc import_list = void:
+    begin bool more := true;
+          next;
+          while more
+          do string alias = expect_ident;
+             string real_name = (sym = s_becomes | next; expect_ident | alias);
+             ref Object members = import_module (real_name);
+             ref Object obj = new_object (c_module, alias, void_type);
+             members of obj := members;
+             insert (obj);
+             more := sym = s_comma;
+             if more then next fi
+          od;
+          expect (s_semicolon, ";")
+    end;
+
+  { Parses a module and appends it to the list of modules, after the modules
+    that it imports. If required_name is not empty, the module must have that
+    name. }
+  proc module_declaration = (string required_name) void:
+    begin expect (s_module, "MODULE");
+          string name = expect_ident;
+          if UPB required_name > 0 andth name /= required_name
+          then error ("the file holds the module " + name + " instead of " + required_name)
+          fi;
+          ref Loaded entry = note_loaded (name, nil);
+          expect (s_semicolon, ";");
+          open_scope;
+          if sym = s_import then import_list fi;
+          declarations;
+          ref Seq body := nil;
+          if sym = s_begin then next; body := statement_sequence fi;
+          expect (s_end, "END");
+          string closing = expect_ident;
+          require (closing = name, "the name after END does not match");
+          expect (s_period, ".");
+          loaded_members of entry := first of top;
+          finished of entry := true;
+          close_scope;
+          ref Module_def m = heap Module_def := (name, body, nil);
+          if NONE first_module then first_module := m else next of last_module := m fi;
+          last_module := m
+    end;
+
+  proc parse_program = (string file_name) ref Program:
+    begin bool found;
+          ref [] char contents = read_file (file_name, found);
+          if NOT found then fatal ("cannot open " + file_name, 1) fi;
+          enter_universe;
+          open_source (file_name, contents);
+          next;
+          module_declaration ("");
+          ref [] Value globals = heap [1:UPB global_inits] Value;
+          globals := global_inits;
+          heap Program := (first_module, globals, fresh_copy (global_objects))
+    end;
+

@@ -1,0 +1,416 @@
+{ syntax.a68 - the modes shared by the parser and the interpreter: types,
+  objects, the syntax tree and runtime values, and the operations on values
+  that both constant folding and evaluation need. }
+
+  { Forms of types. }
+  int f_void = 0, f_byte = 1, f_int = 2, f_real = 3, f_bool = 4,
+          f_char = 5, f_set = 6, f_nil = 7, f_string = 8, f_array = 9,
+          f_record = 10, f_pointer = 11, f_proc = 12;
+
+  { Classes of objects. }
+  int c_const = 1, c_var = 2, c_par = 3, c_var_par = 4, c_field = 5,
+          c_type = 6, c_proc = 7, c_builtin = 8, c_module = 9, c_reader = 10;
+
+  { Binary operators on integers, reals and sets. }
+  int op_add = 1, op_sub = 2, op_mul = 3, op_div = 4, op_mod = 5,
+          op_lsl = 6, op_asr = 7, op_ror = 8, op_ash = 9, op_quot = 10;
+
+  { Relations. }
+  int op_eq = 1, op_ne = 2, op_lt = 3, op_le = 4, op_gt = 5, op_ge = 6;
+
+  { Unary operators. }
+  int u_neg_int = 1, u_neg_real = 2, u_compl_set = 3, u_abs_int = 4,
+          u_abs_real = 5, u_odd = 6, u_floor = 7, u_flt = 8, u_ord_char = 9,
+          u_ord_bool = 10, u_ord_set = 11, u_chr = 12, u_byte = 13,
+          u_singleton = 14, u_cap = 15;
+
+  { Runtime values. A ref row or a ref Value cannot be a direct alternative of
+    the union, since the mode would not be well formed. }
+  mode Value = union (int, long real, bool, char, bits,
+                          ref Array_obj, ref Record_obj, ref Proc_def, Var_ref);
+  mode Var_ref = struct (ref Value target);
+  mode Array_obj = struct (ref [] Value elems);
+  mode Record_obj = struct (ref Type dyn_type, ref [] Value fields);
+
+  mode Type =
+    struct (int form,
+            ref Type base,      { element type, pointer base, record base }
+            int length,         { arrays and strings }
+            ref Object params,  { procedure parameters, record fields }
+            ref Type result,    { procedure result }
+            string name);
+
+  mode Object =
+    struct (int class,
+            string name,
+            ref Type type,
+            ref Object next,
+            bool exported,
+            int level,          { 0 for the module, 1.. for procedures }
+            int home,           { the source that declares the object }
+            int slot,
+            int builtin,
+            Value value,        { constants }
+            ref Proc_def routine,
+            ref Object members);{ the exports of a module }
+
+  { A variable of array or record type, which owns a new object. }
+  mode Fresh = struct (int fresh_slot, ref Type fresh_type);
+
+  mode Native = proc ([] Value) Value;
+  mode Native_def = struct (string module_name, heading, Native code);
+
+  mode Proc_def =
+    struct (string name,
+            int n_params, n_slots,
+            ref Seq body,
+            bool has_result,
+            Expr result,
+            ref [] Value locals,    { initial values of the local variables }
+            ref [] Fresh fresh,     { local arrays and records }
+            ref Native_def native); { nil unless the procedure is built in }
+
+  { Expressions. Structures with the same fields would be the same mode
+    and collapse into one alternative of the union, so the field names
+    keep the nodes apart. }
+  mode Expr = union (ref Const_e, ref Local_e, ref Global_e, ref Var_par_e,
+                         ref Int_e, ref Int_rel_e, ref And_e, ref Or_e,
+                         ref Not_e, ref Call_e, ref Real_e, ref Real_rel_e,
+                         ref Char_rel_e, ref Set_e, ref In_e, ref Range_e,
+                         ref Eq_e, ref Unary_e, ref Call_var_e, ref Native_e,
+                         ref Make_ref_e, ref Index_e, ref Field_e, ref Deref_e,
+                         ref Guard_e, ref Is_e, ref Len_e, ref Str_rel_e);
+
+  mode Const_e = struct (Value value);
+  mode Local_e = struct (int slot);
+  mode Global_e = struct (int global_slot);
+  mode Var_par_e = struct (int par_slot);
+  mode Int_e = struct (int kind, position, Expr left, right);
+  mode Int_rel_e = struct (int int_rel, Expr left, right);
+  mode Real_e = struct (int real_kind, Expr left, right);
+  mode Real_rel_e = struct (int real_rel, Expr left, right);
+  mode Char_rel_e = struct (int char_rel, Expr left, right);
+  mode Set_e = struct (int set_kind, Expr left, right);
+  mode In_e = struct (Expr element, set);
+  mode Range_e = struct (Expr low, high);
+  mode Eq_e = struct (bool negated, Expr left, right);
+  mode And_e = struct (Expr left, right);
+  mode Or_e = struct (Expr first_or, right);
+  mode Not_e = struct (Expr operand);
+  mode Unary_e = struct (int kind, Expr operand);
+  mode Call_e = struct (ref Proc_def callee, ref [] Expr args, int position);
+  mode Call_var_e = struct (Expr callee, ref [] Expr args, int position);
+  mode Native_e = struct (Native code, ref [] Expr args);
+  mode Make_ref_e = struct (Expr variable);
+  mode Index_e = struct (Expr array, index, int position);
+  mode Field_e = struct (Expr record, int field);
+  mode Deref_e = struct (Expr pointer, int position);
+  mode Guard_e = struct (Expr guarded, ref Type guard_type, int position);
+  mode Is_e = struct (Expr tested, ref Type test_type);
+  mode Len_e = struct (Expr measured);
+  mode Str_rel_e = struct (int str_rel, Expr left, right);
+
+  { Statements. }
+  mode Stmt = union (ref Assign_local_s, ref Assign_s, ref Call_s, ref If_s,
+                         ref While_s, ref Repeat_s, ref For_s, ref Case_s,
+                         ref Inc_s, ref Set_elem_s, ref Assert_s, ref Pack_s,
+                         ref Unpk_s, ref Copy_s, ref New_s, ref Type_case_s);
+
+  mode Seq = struct (Stmt stmt, ref Seq next);
+  mode Guarded = struct (Expr test, ref Seq body);
+
+  mode Assign_local_s = struct (int slot, Expr source);
+  mode Assign_s = struct (Expr target, source);
+  mode Call_s = struct (Expr call);
+  mode If_s = struct (ref [] Guarded branches, ref Seq otherwise);
+  mode While_s = struct (ref [] Guarded branches);
+  mode Repeat_s = struct (ref Seq body, Expr test);
+  mode For_s = struct (Expr variable, first, last, int step, ref Seq body);
+  mode Case_range = struct (int low, high);
+  mode Case_arm = struct (ref [] Case_range labels, ref Seq body);
+  mode Case_s = struct (Expr selector, bool is_char, ref [] Case_arm arms,
+                            int position);
+  mode Inc_s = struct (Expr target, amount, bool is_byte);
+  mode Set_elem_s = struct (Expr target, element, bool include);
+  mode Assert_s = struct (Expr test, int position);
+  mode Pack_s = struct (Expr pack_target, exponent);
+  mode Unpk_s = struct (Expr unpk_target, exponent);
+  mode Copy_s = struct (Expr copy_target, copy_source, ref Type copy_type,
+                        int position);
+  mode New_s = struct (Expr new_target, ref Type alloc_type);
+  mode Type_arm = struct (ref Type arm_type, ref Seq arm_body);
+  mode Type_case_s = struct (Expr type_selector, ref [] Type_arm type_arms);
+
+  { A compiled module. Its global variables are slots at the bottom of the
+    stack. }
+  mode Module_def = struct (string name, ref Seq body, ref Module_def next);
+
+  mode Program =
+    struct (ref Module_def first, ref [] Value globals,
+            ref [] Fresh global_objects);
+
+  { Tests for nil. A plain identity relation would compare the variable
+    itself when the operand is a variable of a reference mode. }
+
+  op NONE = (ref Object x) bool: x is nil;
+  op SOME = (ref Object x) bool: x isnt nil;
+  op NONE = (ref Seq x) bool: x is nil;
+  op SOME = (ref Seq x) bool: x isnt nil;
+  op NONE = (ref Module_def x) bool: x is nil;
+  op SOME = (ref Module_def x) bool: x isnt nil;
+  op SOME = (ref Native_def x) bool: x isnt nil;
+  op NONE = (ref Type x) bool: x is nil;
+  op SOME = (ref Type x) bool: x isnt nil;
+
+  { Conversions out of the union. The parser has checked the types. }
+
+  proc as_int = (Value v) int: case v in (int i): i esac;
+  proc as_real = (Value v) long real: case v in (long real x): x esac;
+  proc as_bool = (Value v) bool: case v in (bool b): b esac;
+  proc as_char = (Value v) char: case v in (char c): c esac;
+  proc as_set = (Value v) bits: case v in (bits s): s esac;
+  proc as_array = (Value v) ref Array_obj: case v in (ref Array_obj a): a esac;
+  proc as_record = (Value v) ref Record_obj: case v in (ref Record_obj r): r esac;
+
+  { Operations. }
+
+  int word_bits = 32;
+
+  { Division with a remainder in 0 .. ABS y - 1. The divisor is not zero. }
+  proc int_div = (int x, y) int:
+    if y = -1
+    then -x
+    else int q = x % y;
+         if x < 0 andth q * y /= x then (y > 0 | q - 1 | q + 1) else q fi
+    fi;
+
+  proc int_mod = (int x, y) int: (y = -1 | 0 | x %* y);
+
+  proc shift_count = (int n) int: n %* word_bits;
+
+  proc logical_left = (int x, n) int: ABS (BIN x SHL shift_count (n));
+
+  proc logical_right = (int x, n) int: ABS (BIN x SHR shift_count (n));
+
+  proc arithmetic_right = (int x, n) int:
+    if x >= 0
+    then logical_right (x, n)
+    else ABS (NOT (NOT BIN x SHR shift_count (n)))
+    fi;
+
+  proc rotate_right = (int x, n) int:
+    if shift_count (n) = 0
+    then x
+    else ABS ((BIN x SHR shift_count (n))
+                OR (BIN x SHL (word_bits - shift_count (n))))
+    fi;
+
+  { Left if n is positive, otherwise an arithmetic shift to the right. }
+  proc arithmetic_shift = (int x, n) int:
+    if n >= word_bits then 0
+    elif n >= 0 then logical_left (x, n)
+    elif n <= -word_bits then (x < 0 | -1 | 0)
+    else arithmetic_right (x, -n)
+    fi;
+
+  proc int_op = (int kind, l, r) int:
+    case kind
+    in l + r, l - r, l * r, int_div (l, r), int_mod (l, r),
+       logical_left (l, r), arithmetic_right (l, r), rotate_right (l, r),
+       arithmetic_shift (l, r)
+    esac;
+
+  proc real_op = (int kind, long real l, r) long real:
+    if kind = op_add then l + r
+    elif kind = op_sub then l - r
+    elif kind = op_mul then l * r
+    else l / r
+    fi;
+
+  proc set_op = (int kind, bits l, r) bits:
+    if kind = op_add then l OR r
+    elif kind = op_sub then l AND NOT r
+    elif kind = op_mul then l AND r
+    else (l OR r) AND NOT (l AND r)
+    fi;
+
+  proc int_rel = (int kind, l, r) bool:
+    case kind in l = r, l /= r, l < r, l <= r, l > r, l >= r esac;
+
+  { An ordered comparison with NaN must be false. In a68j 0.6.0, > and >= yield
+    true for NaN, whereas < and <= are correct, so the operands are swapped. }
+  proc real_rel = (int kind, long real l, r) bool:
+    case kind in l = r, l /= r, l < r, l <= r, r < l, r <= l esac;
+
+  proc char_rel = (int kind, char l, r) bool:
+    int_rel (kind, ABS l, ABS r);
+
+  proc element_set = (int e) bits: BIN 1 SHL e;
+
+  proc range_set = (int low, high) bits:
+    begin bits s := BIN 0;
+          for e from low to high do s := s OR element_set (e) od;
+          s
+    end;
+
+  proc set_contains = (bits s, int e) bool:
+    (e >= 0 andth e < word_bits) andth (word_bits - e) ELEM s;
+
+  { The largest integer not above x, limited to the range of INTEGER. }
+  proc floor_of = (long real x) int:
+    if x >= long real (LENG max_int) then max_int
+    elif x <= long real (LENG (-max_int - 1)) then -max_int - 1
+    elif x /= x then 0
+    else SHORTEN ENTIER x
+    fi;
+
+  proc upper_case = (char c) char:
+    (c >= "a" andth c <= "z" | REPR (ABS c - ABS "a" + ABS "A") | c);
+
+  proc values_equal = (Value a, b) bool:
+    case a
+    in (bool x): (b | (bool y): x = y | false),
+       (bits x): (b | (bits y): x = y | false),
+       (ref Record_obj x): (b | (ref Record_obj y): x is y | false),
+       (ref Proc_def x): (b | (ref Proc_def y): x is y | false)
+    out false
+    esac;
+
+  proc unary_op = (int kind, Value v) Value:
+    case kind
+    in Value (-as_int (v)),
+       Value (-as_real (v)),
+       Value (NOT as_set (v)),
+       Value (ABS as_int (v)),
+       Value (ABS as_real (v)),
+       Value (as_int (v) %* 2 = 1),
+       Value (floor_of (as_real (v))),
+       Value (long real (LENG as_int (v))),
+       Value (ABS as_char (v)),
+       Value ((as_bool (v) | 1 | 0)),
+       Value (ABS as_set (v)),
+       Value (REPR (as_int (v) %* 65536)),
+       Value (as_int (v) %* 256),
+       Value (element_set (as_int (v))),
+       Value (upper_case (as_char (v)))
+    esac;
+
+  { Types at run time. }
+
+  proc is_aggregate = (ref Type t) bool:
+    form of t = f_array orel form of t = f_record;
+
+  { Whether the record type t is base_type or an extension of it. }
+  proc extends = (ref Type t, base_type) bool:
+    begin ref ref Type x = loc ref Type := t;
+          while SOME x andth (ref Type (x) isnt base_type) do x := base of x od;
+          SOME x
+    end;
+
+  proc default_value = (ref Type t) Value:
+    if form of t = f_int orel form of t = f_byte then 0
+    elif form of t = f_real then long 0.0
+    elif form of t = f_bool then false
+    elif form of t = f_char then REPR 0
+    elif form of t = f_set then BIN 0
+    elif form of t = f_proc then ref Proc_def (nil)
+    else ref Record_obj (nil)
+    fi;
+
+  proc init_fields = (ref Type t, ref [] Value fields) void:
+    begin if SOME base of t then init_fields (base of t, fields) fi;
+          ref ref Object f = loc ref Object := params of t;
+          while SOME f
+          do fields[slot of f] := new_instance (type of f);
+             f := next of f
+          od
+    end;
+
+  { A new variable of type t: its initial value, or a new object. }
+  proc new_instance = (ref Type t) Value:
+    if form of t = f_array
+    then int n = length of t;
+         ref [] Value elems = heap [1:n] Value;
+         ref Type element = base of t;
+         if is_aggregate (element)
+         then for i to n do elems[i] := new_instance (element) od
+         else Value initial = default_value (element);
+              for i to n do elems[i] := initial od
+         fi;
+         ref Array_obj a = heap Array_obj;
+         elems of a := elems;
+         a
+    elif form of t = f_record
+    then ref [] Value fields = heap [1:length of t] Value;
+         init_fields (t, fields);
+         heap Record_obj := (t, fields)
+    else default_value (t)
+    fi;
+
+  proc copy_fields = (ref Type t, ref [] Value target, source, int position) void:
+    begin if SOME base of t then copy_fields (base of t, target, source, position) fi;
+          ref ref Object f = loc ref Object := params of t;
+          while SOME f
+          do int s = slot of f;
+             if is_aggregate (type of f)
+             then copy_aggregate (type of f, target[s], source[s], position)
+             else target[s] := source[s]
+             fi;
+             f := next of f
+          od
+    end;
+
+  { Copies an array or a record, guided by the type of the destination. A
+    source of an extended type contributes only the fields of that type, and
+    a source array can be shorter. }
+  proc copy_aggregate = (ref Type t, Value target, source, int position) void:
+    if form of t = f_array
+    then ref [] Value dst = elems of as_array (target);
+         ref [] Value src = elems of as_array (source);
+         if UPB src > UPB dst then runtime_error (position, "array copy overflow") fi;
+         ref Type element = base of t;
+         for i to UPB src
+         do if is_aggregate (element)
+            then copy_aggregate (element, dst[i], src[i], position)
+            else dst[i] := src[i]
+            fi
+         od
+    else copy_fields (t, fields of as_record (target), fields of as_record (source),
+                      position)
+    fi;
+
+  proc char_at = (ref [] Value row, int i) int:
+    (i <= UPB row | ABS as_char (row[i]) | 0);
+
+  { Negative, zero or positive, as the string a is before, equal to or after
+    the string b. }
+  proc string_compare = (Value a, b) int:
+    begin ref [] Value x = elems of as_array (a);
+          ref [] Value y = elems of as_array (b);
+          int i := 1;
+          while char_at (x, i) = char_at (y, i) andth char_at (x, i) /= 0
+          do i +:= 1 od;
+          char_at (x, i) - char_at (y, i)
+    end;
+
+  { Node construction. A structure with one field has no display. }
+
+  proc const_e = (Value v) Expr:
+    begin ref Const_e n = heap Const_e; value of n := v; n end;
+  proc local_e = (int s) Expr:
+    begin ref Local_e n = heap Local_e; slot of n := s; n end;
+  proc global_e = (int s) Expr:
+    begin ref Global_e n = heap Global_e; global_slot of n := s; n end;
+  proc var_par_e = (int s) Expr:
+    begin ref Var_par_e n = heap Var_par_e; par_slot of n := s; n end;
+  proc not_e = (Expr e) Expr:
+    begin ref Not_e n = heap Not_e; operand of n := e; n end;
+  proc make_ref_e = (Expr e) Expr:
+    begin ref Make_ref_e n = heap Make_ref_e; variable of n := e; n end;
+  proc len_e = (Expr e) Expr:
+    begin ref Len_e n = heap Len_e; measured of n := e; n end;
+  proc call_s = (Expr e) Stmt:
+    begin ref Call_s n = heap Call_s; call of n := e; n end;
+  proc while_s = (ref [] Guarded g) Stmt:
+    begin ref While_s n = heap While_s; branches of n := g; n end;
+

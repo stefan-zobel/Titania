@@ -1,0 +1,39 @@
+{ titania.a68 - an interpreter for Oberon-07, written in Algol 68.
+
+  Usage: titania [-I DIRECTORY]... [-oberonc] FILE
+
+  -I names a directory to search for imported modules, after the directory of
+  the importing file. -oberonc predeclares the names that the test programs
+  of the compiler oberonc use.
+
+  The parts are included in dependency order, so that the whole interpreter
+  is one Algol 68 program. }
+
+begin
+  [[ include "scanner.a68" ]]
+  [[ include "syntax.a68" ]]
+  [[ include "library.a68" ]]
+  [[ include "parser.a68" ]]
+  [[ include "interp.a68" ]]
+
+  proc usage = void: fatal ("usage: titania [-I DIRECTORY]... [-oberonc] FILE", 1);
+
+  string source_file := "";
+  int argument := 2;
+  while argument <= argc
+  do string a = argv (argument);
+     if a = "-I"
+     then if argument = argc then usage fi;
+          add_search_directory (argv (argument + 1));
+          argument +:= 1
+     elif a = "-oberonc"
+     then oberonc_names := true
+     elif UPB source_file > 0
+     then usage
+     else source_file := a
+     fi;
+     argument +:= 1
+  od;
+  if UPB source_file = 0 then usage fi;
+  run (parse_program (source_file))
+end

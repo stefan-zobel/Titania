@@ -1,0 +1,1 @@
+OpenAssign.Mod:4:10: error: an open array cannot be assigned to

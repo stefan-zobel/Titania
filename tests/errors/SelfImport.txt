@@ -1,0 +1,1 @@
+SelfImport.Mod:2:10: error: recursive import of SelfImport

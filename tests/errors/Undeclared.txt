@@ -1,0 +1,1 @@
+Undeclared.Mod:3:3: error: undeclared identifier x

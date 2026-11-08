@@ -1,0 +1,1 @@
+BadGuardType.Mod:10:12: error: the type must be an extension

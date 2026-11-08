@@ -1,0 +1,4 @@
+MODULE EndName;
+  PROCEDURE P;
+  END Q;
+END EndName.

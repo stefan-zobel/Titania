@@ -1,0 +1,3 @@
+MODULE PtrToArray;
+  TYPE P = POINTER TO ARRAY 3 OF INTEGER;
+END PtrToArray.

@@ -1,0 +1,41 @@
+MODULE Pattern2c;
+
+  VAR s, t, u: SET;
+BEGIN 
+  s := {1, 5} + {2, 7, 4};
+  WriteInt(ORD(s));
+  s := {1, 5} * {7, 1, 2};
+  WriteInt(ORD(s));
+  s := {1, 5} - {7, 1, 2};
+  WriteInt(ORD(s));
+  s := {1, 5, 2} / {7, 1, 2};
+  WriteInt(ORD(s));
+  u := {1, 5};
+  s := u + {2, 7, 4};
+  WriteInt(ORD(s));
+  u := {1, 5};
+  s := u * {7, 1, 2};
+  WriteInt(ORD(s));
+  u := {1, 5};
+  s := u - {7, 1, 2};
+  WriteInt(ORD(s));
+  u := {1, 5, 2};
+  s := u / {7, 1, 2};
+  WriteInt(ORD(s));
+  u := {1, 5};
+  t := {2, 7, 4};
+  s := u + t;
+  WriteInt(ORD(s));
+  u := {1, 5};
+  t := {7, 1, 2};
+  s := u * t;
+  WriteInt(ORD(s));
+  u := {1, 5};
+  t := {7, 1, 2};
+  s := u - t;
+  WriteInt(ORD(s));
+  u := {1, 5, 2};
+  t := {7, 1, 2};
+  s := u / t;
+  WriteInt(ORD(s));
+END Pattern2c.

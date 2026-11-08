@@ -1,0 +1,387 @@
+{ scanner.a68 - symbols, source positions and diagnostics of Titania.
+
+  The scanner keeps one current source. An import reads another source in the
+  middle of a compilation, so the whole state can be saved and restored. }
+
+  { Symbols. }
+  int s_eof = 0, s_ident = 1, s_integer = 2, s_real = 3, s_string = 4,
+          s_plus = 5, s_minus = 6, s_times = 7, s_slash = 8, s_not = 9,
+          s_and = 10, s_period = 11, s_comma = 12, s_semicolon = 13,
+          s_bar = 14, s_lparen = 15, s_rparen = 16, s_lbrak = 17,
+          s_rbrak = 18, s_lbrace = 19, s_rbrace = 20, s_becomes = 21,
+          s_caret = 22, s_eql = 23, s_neq = 24, s_lss = 25, s_gtr = 26,
+          s_leq = 27, s_geq = 28, s_upto = 29, s_colon = 30;
+  int s_array = 31, s_begin = 32, s_by = 33, s_case = 34, s_const = 35,
+          s_div = 36, s_do = 37, s_else = 38, s_elsif = 39, s_end = 40,
+          s_false = 41, s_for = 42, s_if = 43, s_import = 44, s_in = 45,
+          s_is = 46, s_mod = 47, s_module = 48, s_nil = 49, s_of = 50,
+          s_or = 51, s_pointer = 52, s_procedure = 53, s_record = 54,
+          s_repeat = 55, s_return = 56, s_then = 57, s_to = 58, s_true = 59,
+          s_type = 60, s_until = 61, s_var = 62, s_while = 63;
+
+  mode Keyword = struct (string spelling, int symbol);
+
+  [] Keyword keywords =
+    (("ARRAY", s_array), ("BEGIN", s_begin), ("BY", s_by), ("CASE", s_case),
+     ("CONST", s_const), ("DIV", s_div), ("DO", s_do), ("ELSE", s_else),
+     ("ELSIF", s_elsif), ("END", s_end), ("FALSE", s_false), ("FOR", s_for),
+     ("IF", s_if), ("IMPORT", s_import), ("IN", s_in), ("IS", s_is),
+     ("MOD", s_mod), ("MODULE", s_module), ("NIL", s_nil), ("OF", s_of),
+     ("OR", s_or), ("POINTER", s_pointer), ("PROCEDURE", s_procedure),
+     ("RECORD", s_record), ("REPEAT", s_repeat), ("RETURN", s_return),
+     ("THEN", s_then), ("TO", s_to), ("TRUE", s_true), ("TYPE", s_type),
+     ("UNTIL", s_until), ("VAR", s_var), ("WHILE", s_while));
+
+  { The value of the current symbol. }
+  int sym := s_eof;
+  string ident := "";
+  int int_value := 0;
+  long real real_value := long 0.0;
+  string string_value := "";
+  int sym_line := 0, sym_column := 0;
+  int previous_line := 0, previous_column := 0;
+
+  char eof_char = REPR 0;
+  long long int word_limit = long long 4294967295;
+
+  { File names of all sources. A position is one int: the index into this
+    table, multiplied by position_scale, plus the line number. }
+  flex [1:0] string file_names;
+  int position_scale = 1048576;
+
+  mode Source_text = ref [] char;
+  ref Source_text text = heap Source_text := heap [1:1] char;
+  int file_index := 0;
+  int cursor := 1;
+  int line := 1, column := 0;
+  char ch := eof_char;
+
+  mode Scanner_state =
+    struct (ref [] char saved_text,
+            int saved_file, saved_cursor, saved_line, saved_column,
+            char saved_ch,
+            int saved_sym, saved_int, saved_sym_line, saved_sym_column,
+            saved_previous_line, saved_previous_column,
+            long real saved_real,
+            string saved_ident, saved_string);
+
+  proc save_scanner = Scanner_state:
+    (text, file_index, cursor, line, column, ch,
+     sym, int_value, sym_line, sym_column, previous_line, previous_column,
+     real_value, ident, string_value);
+
+  proc restore_scanner = (Scanner_state s) void:
+    begin text := saved_text of s;
+          file_index := saved_file of s;
+          cursor := saved_cursor of s;
+          line := saved_line of s;
+          column := saved_column of s;
+          ch := saved_ch of s;
+          sym := saved_sym of s;
+          int_value := saved_int of s;
+          sym_line := saved_sym_line of s;
+          sym_column := saved_sym_column of s;
+          previous_line := saved_previous_line of s;
+          previous_column := saved_previous_column of s;
+          real_value := saved_real of s;
+          ident := saved_ident of s;
+          string_value := saved_string of s
+    end;
+
+  proc digit_text = (int n) string: whole (n, 0);
+
+  { Diagnostics. }
+
+  proc fatal = (string message, int status) void:
+    begin fputs (stderr, message + REPR 10);
+          posix_exit (status)
+    end;
+
+  { The position of the symbol read last, and of the one before it, which
+    is the last symbol of a construct that has just been parsed. }
+  proc symbol_position = int:
+    file_index * position_scale + sym_line;
+
+  proc current_position = int:
+    file_index * position_scale + previous_line;
+
+  proc runtime_error = (int position, string message) void:
+    fatal (file_names[position % position_scale] + ":"
+             + digit_text (position %* position_scale)
+             + ": runtime error: " + message, 2);
+
+  proc error_at = (int at_line, at_column, string message) void:
+    fatal (file_names[file_index] + ":" + digit_text (at_line) + ":"
+             + digit_text (at_column) + ": error: " + message, 1);
+
+  { An error at the symbol that has not been consumed yet. }
+  proc syntax_error = (string message) void:
+    error_at (sym_line, sym_column, message);
+
+  { An error in the construct that ends with the symbol consumed last. }
+  proc error = (string message) void:
+    error_at (previous_line, previous_column, message);
+
+  { Sources. }
+
+  proc install = (string name, ref [] char contents) void:
+    begin file_names := begin [1:UPB file_names + 1] string names;
+                              names[:UPB file_names] := file_names;
+                              names[UPB names] := name;
+                              names
+                        end;
+          file_index := UPB file_names;
+          text := contents;
+          cursor := 0;
+          line := 1;
+          column := 0;
+          advance
+    end;
+
+  { Reads a whole file. The result is empty if the file cannot be opened,
+    and always ends with eof_char. }
+  proc read_file = (string name, ref bool found) ref [] char:
+    begin int fd = fopen (name, file_o_rdonly);
+          found := fd >= 0;
+          if found
+          then int size = SHORTEN SHORTEN fsize (fd);
+               ref [] char buffer = heap [1:size + 1] char;
+               { size counts bytes, but fgetc yields decoded characters. }
+               int count := 0;
+               bool more := true;
+               while more andth count < size
+               do char c = fgetc (fd);
+                  more := ABS c >= 0;
+                  if more then count +:= 1; buffer[count] := c fi
+               od;
+               buffer[count + 1] := eof_char;
+               fclose (fd);
+               buffer[:count + 1]
+          else ref [] char none = heap [1:1] char;
+               none[1] := eof_char;
+               none
+          fi
+    end;
+
+  { Makes a file, already read, the current source. }
+  proc open_source = (string name, ref [] char contents) void:
+    install (name, contents);
+
+  { Makes a string the current source; used for library interfaces. }
+  proc open_text = (string name, string contents) void:
+    begin ref [] char row = heap [1:UPB contents + 1] char;
+          row[:UPB contents] := contents;
+          row[UPB row] := eof_char;
+          install (name, row)
+    end;
+
+  proc advance = void:
+    if cursor < UPB text
+    then cursor +:= 1;
+         ch := text[cursor];
+         if ch = REPR 10
+         then line +:= 1; column := 0
+         else column +:= 1
+         fi
+    else ch := eof_char
+    fi;
+
+  proc at_end = bool: cursor >= UPB text;
+
+  proc is_digit = (char c) bool: c >= "0" andth c <= "9";
+
+  proc is_letter = (char c) bool:
+    (c >= "A" andth c <= "Z") orel (c >= "a" andth c <= "z");
+
+  proc is_hex_letter = (char c) bool: c >= "A" andth c <= "F";
+
+  proc digit_value = (char c) int:
+    (is_digit (c) | ABS c - ABS "0" | ABS c - ABS "A" + 10);
+
+  proc skip_comment = void:
+    begin int start_line = line, start_column = column;
+          int depth := 1;
+          advance;
+          while depth > 0
+          do if at_end
+             then error_at (start_line, start_column, "unterminated comment")
+             elif ch = "("
+             then advance;
+                  if ch = "*" then depth +:= 1; advance fi
+             elif ch = "*"
+             then advance;
+                  if ch = ")" then depth -:= 1; advance fi
+             else advance
+             fi
+          od
+    end;
+
+  proc scan_identifier = void:
+    begin string spelling := "";
+          while is_letter (ch) orel is_digit (ch)
+          do spelling +:= ch; advance od;
+          ident := spelling;
+          sym := s_ident;
+          for i to UPB keywords
+          do if spelling = spelling of keywords[i] then sym := symbol of keywords[i] fi od
+    end;
+
+  proc scan_string = void:
+    begin string value := "";
+          advance;
+          while ch /= """"
+          do if at_end orel ch = REPR 10 then syntax_error ("unterminated string") fi;
+             value +:= ch;
+             advance
+          od;
+          advance;
+          string_value := value;
+          sym := s_string
+    end;
+
+  proc power_of_ten = (int n) long real:
+    begin long real result := long 1.0;
+          for i to n do result *:= long 10.0 od;
+          result
+    end;
+
+  { The value of digits * 10 ** exponent. A mantissa below 2 ** 53 and one
+    division by an exact power of ten keep common decimals exact, so digits
+    beyond that range are dropped. }
+  proc decimal_value = (string digits, int exponent) long real:
+    begin long real mantissa := long 0.0;
+          int scale := exponent;
+          for i to UPB digits
+          do if mantissa < long 900719925474099.0
+             then mantissa := mantissa * long 10.0
+                                + long real (LENG digit_value (digits[i]))
+             else scale +:= 1
+             fi
+          od;
+          (scale < 0 | mantissa / power_of_ten (-scale)
+                     | mantissa * power_of_ten (scale))
+    end;
+
+  { digits holds the digits scanned so far, up to the decimal point, which is
+    the current character. }
+  proc scan_real = (string digits) void:
+    begin string all_digits := digits;
+          int exponent := 0;
+          for i to UPB digits
+          do if is_hex_letter (digits[i]) then syntax_error ("bad number") fi od;
+          advance;
+          while is_digit (ch)
+          do all_digits +:= ch;
+             exponent -:= 1;
+             advance
+          od;
+          if ch = "E"
+          then bool negative := false;
+               int scale := 0;
+               advance;
+               if ch = "+" then advance
+               elif ch = "-" then negative := true; advance
+               fi;
+               if NOT is_digit (ch) then syntax_error ("bad exponent") fi;
+               while is_digit (ch)
+               do if scale < 100000 then scale := scale * 10 + digit_value (ch) fi;
+                  advance
+               od;
+               exponent +:= (negative | -scale | scale)
+          fi;
+          real_value := decimal_value (all_digits, exponent);
+          sym := s_real
+    end;
+
+  proc scan_number = void:
+    begin string digits := "";
+          while is_digit (ch) orel is_hex_letter (ch)
+          do digits +:= ch; advance od;
+          if ch = "."
+             andth (cursor >= UPB text orel text[cursor + 1] /= ".")
+          then scan_real (digits)
+          elif ch = "H" orel ch = "X"
+          then long long int value := long long 0;
+               for i to UPB digits
+               do value := value * long long 16 + LENG LENG digit_value (digits[i]);
+                  if value > word_limit then syntax_error ("number too large") fi
+               od;
+               if ch = "X"
+               then if value > LENG LENG 255 then syntax_error ("bad character code") fi;
+                    string_value := REPR SHORTEN SHORTEN value;
+                    sym := s_string
+               else int_value := (value > LENG LENG max_int
+                                  | SHORTEN SHORTEN (value - word_limit - long long 1)
+                                  | SHORTEN SHORTEN value);
+                    sym := s_integer
+               fi;
+               advance
+          else long long int value := long long 0;
+               for i to UPB digits
+               do if is_hex_letter (digits[i]) then syntax_error ("bad number") fi;
+                  value := value * long long 10 + LENG LENG digit_value (digits[i]);
+                  if value > LENG LENG max_int then syntax_error ("number too large") fi
+               od;
+               int_value := SHORTEN SHORTEN value;
+               sym := s_integer
+          fi
+    end;
+
+  { Reads a one or two character operator. If ch equals second, the result is
+    long_symbol, else short_symbol. }
+  proc pair = (char second, int long_symbol, short_symbol) void:
+    begin advance;
+          if ch = second
+          then advance; sym := long_symbol
+          else sym := short_symbol
+          fi
+    end;
+
+  proc single = (int symbol) void:
+    begin advance; sym := symbol end;
+
+  proc next = void:
+    begin bool again := true;
+          previous_line := sym_line;
+          previous_column := sym_column;
+          while again
+          do again := false;
+             while NOT at_end andth ABS ch <= 32 do advance od;
+             sym_line := line;
+             sym_column := column;
+             if at_end then sym := s_eof
+             elif is_letter (ch) then scan_identifier
+             elif is_digit (ch) then scan_number
+             elif ch = """" then scan_string
+             elif ch = "("
+             then advance;
+                  if ch = "*"
+                  then skip_comment; again := true
+                  else sym := s_lparen
+                  fi
+             elif ch = "+" then single (s_plus)
+             elif ch = "-" then single (s_minus)
+             elif ch = "*" then single (s_times)
+             elif ch = "/" then single (s_slash)
+             elif ch = "~" then single (s_not)
+             elif ch = "&" then single (s_and)
+             elif ch = "," then single (s_comma)
+             elif ch = ";" then single (s_semicolon)
+             elif ch = "|" then single (s_bar)
+             elif ch = ")" then single (s_rparen)
+             elif ch = "[" then single (s_lbrak)
+             elif ch = "]" then single (s_rbrak)
+             elif ch = "{" then single (s_lbrace)
+             elif ch = "}" then single (s_rbrace)
+             elif ch = "^" then single (s_caret)
+             elif ch = "=" then single (s_eql)
+             elif ch = "#" then single (s_neq)
+             elif ch = "." then pair (".", s_upto, s_period)
+             elif ch = ":" then pair ("=", s_becomes, s_colon)
+             elif ch = "<" then pair ("=", s_leq, s_lss)
+             elif ch = ">" then pair ("=", s_geq, s_gtr)
+             else syntax_error ("illegal character")
+             fi
+          od
+    end;
+

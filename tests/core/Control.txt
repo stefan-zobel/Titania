@@ -1,0 +1,16 @@
+ 0 1 2
+6
+  7  4  1 -2
+ 1 2 3
+ 10  6  2
+  5
+ 1 2 3 4 5
+abbcdcdcd
+zero
+small
+seven
+large
+abc
+xy
+A
+abc

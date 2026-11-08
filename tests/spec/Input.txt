@@ -1,0 +1,10 @@
+-2
+2.500
+100.000
+no number
+10
+X
+rest of
+a line 
+end
+end

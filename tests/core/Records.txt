@@ -1,0 +1,21 @@
+1
+5 6 7
+base
+ext
+ext2
+case base 5
+case ext 2
+case ext2 2
+8
+9 8
+1 2 abc zbc
+1
+2
+55 25
+0
+  1  2  5  8
+12  1
+9
+square notcircle
+4
+42
